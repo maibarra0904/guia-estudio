@@ -1,0 +1,728 @@
+import React, { useEffect, useState, useRef } from 'react'
+import generateGuide from '../services/groqService'
+
+const LS_KEY = 'guideForm_v1'
+
+function copyPlain(text) {
+  if (!text) return
+  try {
+    navigator.clipboard.writeText(text)
+  } catch (err) {
+    console.warn('clipboard write failed', err)
+  }
+}
+
+function hashCode(s) {
+  let h = 0
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.codePointAt(i)
+    h = Math.trunc(h)
+  }
+  return Math.abs(h)
+}
+
+function isHeaderLine(ln) {
+  const m = ln.match(/^Criterios?\s*[:-]?\s*(.+)$/i)
+  if (!m) return null
+  const title = m[1].trim()
+  if (/evaluac/i.test(title) || title.length < 3) return null
+  return title
+}
+
+// parseNivelLn removed (replaced by block-based parse with regex)
+
+function parseRubricaTable(text) {
+  const txt = text.trim()
+  const lines = txt.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const tableLines = lines.filter(l => l.includes('|') && !/^\s*\|?\s*-{3,}/.test(l))
+  let bodyLines = tableLines
+  if (tableLines.length > 0 && /criteri|muy bien|bien|en progreso/i.test(tableLines[0])) {
+    bodyLines = tableLines.slice(1)
+  }
+  const items = []
+  for (const l of bodyLines) {
+    const parts = l.split('|').map(p => p.trim()).filter((p, i) => !(i === 0 && p === ''))
+    if (parts.length === 0) continue
+    const criterion = parts[0] || 'Criterio'
+    const col1 = parts[1] || ''
+    const col2 = parts[2] || ''
+    const col3 = parts[3] || ''
+    items.push({ criterion, muyBien: col1, bien: col2, enProgreso: col3 })
+  }
+  const mapped = items.slice(0, 4)
+  while (mapped.length < 4) mapped.push({ criterion: `Criterio ${mapped.length + 1}`, muyBien: '-', bien: '-', enProgreso: '-' })
+  return mapped
+}
+
+function parseRubricaBlocks(text) {
+  const txt = text.trim()
+  const blocks = txt.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean)
+  const items = []
+  for (const block of blocks) {
+    const lines = block.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    // título: preferir línea que parezca cabecera, si no la primera línea
+    const titleLine = lines.find(l => isHeaderLine(l)) || lines[0] || 'Criterio'
+    const title = isHeaderLine(titleLine) || titleLine
+    // buscar todas las ocurrencias de 'Nivel N: texto' en el bloque
+    const niveles = {}
+  const nivelRe = /Nivel\s*(\d+)\s*[: -]?\s*(.+)/gi
+    let m
+    while ((m = nivelRe.exec(block)) !== null) {
+      const n = Number(m[1])
+      const txtN = m[2].trim()
+      niveles[n] = niveles[n] ? niveles[n] + ' ' + txtN : txtN
+    }
+    items.push({ criterion: title, niveles })
+  }
+  const mapped = items.slice(0, 4).map(it => ({
+    criterion: it.criterion,
+    muyBien: it.niveles[3] || '',
+    bien: it.niveles[2] || '',
+    enProgreso: it.niveles[1] || ''
+  }))
+  while (mapped.length < 4) mapped.push({ criterion: `Criterio ${mapped.length + 1}`, muyBien: '-', bien: '-', enProgreso: '-' })
+  return mapped
+}
+
+function parseRubrica(text) {
+  if (!text || !text.trim()) {
+    return [
+      { criterion: 'Criterio 1', muyBien: '-', bien: '-', enProgreso: '-' },
+      { criterion: 'Criterio 2', muyBien: '-', bien: '-', enProgreso: '-' },
+      { criterion: 'Criterio 3', muyBien: '-', bien: '-', enProgreso: '-' },
+      { criterion: 'Criterio 4', muyBien: '-', bien: '-', enProgreso: '-' },
+    ]
+  }
+  const txt = text.trim()
+  const lines = txt.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const hasTable = lines.some(l => l.includes('|'))
+  if (hasTable) return parseRubricaTable(text)
+  return parseRubricaBlocks(text)
+}
+
+// Parse sencillo y robusto de la sección AUTOEVALUACIÓN: retorna array de {question, options[]}
+function splitIntoBlocks(text) {
+  return text.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean)
+}
+
+function extractNumberedBodies(block) {
+  const re = /(\d+)\.\s*([\s\S]*?)(?=(?:\n\s*\d+\.|$))/g
+  const found = []
+  let m
+  while ((m = re.exec(block)) !== null) found.push(m[2].trim())
+  return found
+}
+
+function parseQuestionFromBody(body) {
+  const singleLine = !/\n/.test(body)
+  let questionText = ''
+  let optionsText = ''
+  if (singleLine && /[A-Z]\)/.test(body)) {
+    const idx = body.search(/\b[A-Z]\)/)
+    questionText = idx > 0 ? body.slice(0, idx).trim() : ''
+    optionsText = idx > 0 ? body.slice(idx) : ''
+  } else {
+    const lines = body.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    questionText = lines[0] || ''
+    optionsText = lines.slice(1).join('\n')
+  }
+  const optRe = /([A-Z])\)\s*([\s\S]*?)(?=(?:\n\s*[A-Z]\)|$))/gim
+  const options = []
+  let om
+  while ((om = optRe.exec(optionsText)) !== null) {
+    options.push({ label: om[1].toUpperCase(), text: om[2].trim(), correct: false })
+  }
+  return { question: questionText, options }
+}
+
+function markCorrect(options, textBody) {
+  const mark = textBody.match(/\(([A-Z])\)\s*correcto/i)
+  if (mark) {
+    const lab = mark[1].toUpperCase()
+    for (const o of options) if (o.label === lab) o.correct = true
+    return
+  }
+  for (const o of options) if (/\bcorrecto\b/i.test(o.text)) o.correct = true
+}
+
+function parseAutoevaluacion(text) {
+  if (!text || !text.trim()) return []
+  const blocks = splitIntoBlocks(text)
+  const questions = []
+  for (const block of blocks) {
+    const bodies = extractNumberedBodies(block)
+    if (bodies.length) {
+      for (const b of bodies) {
+        const pq = parseQuestionFromBody(b)
+        markCorrect(pq.options, b)
+        // eliminar opciones residuales que solo contienen la palabra 'correcto' (p. ej. líneas como "C) correcto")
+        pq.options = pq.options.filter(o => !/^\s*correcto\s*$/i.test(o.text))
+        questions.push(pq)
+      }
+    } else {
+      const pq = parseQuestionFromBody(block)
+      markCorrect(pq.options, block)
+      pq.options = pq.options.filter(o => !/^\s*correcto\s*$/i.test(o.text))
+      questions.push(pq)
+    }
+  }
+  return questions
+}
+
+// Sanitizar texto de rúbrica: eliminar paréntesis con puntuaciones como '(4 puntos)', '(2.5 pts)', etc.
+function sanitizeRubricaText(text) {
+  if (!text) return text
+  // eliminar cualquier paréntesis que contenga números o las palabras 'pts'/'puntos'
+  return text.replaceAll(/\([^)]*(?:\d|pts?|puntos?)[^)]*\)/ig, '')
+}
+
+// parseAutoevaluacion moved inside component to access state
+
+// renderAutoevaluacion will be defined inside the component to access state
+
+export default function GuideForm() {
+  const [asignatura, setAsignatura] = useState('')
+  const [unidad, setUnidad] = useState('')
+  const [temas, setTemas] = useState(() => [{ id: `tema-0-${Date.now()}`, text: '' }])
+  const [semanaInicio, setSemanaInicio] = useState('')
+  const [groqKey, setGroqKey] = useState('')
+  const [editingKey, setEditingKey] = useState(false)
+  const groqKeyRef = useRef(null)
+
+  // Secciones (almacenadas en estados individuales, como pediste)
+  const [datosText, setDatosText] = useState('')
+  const [desarrolloText, setDesarrolloText] = useState('')
+  const [actividadesText, setActividadesText] = useState('')
+  const [rubricaText, setRubricaText] = useState('')
+  const [autoevaluacionText, setAutoevaluacionText] = useState('')
+  const [bibliografiaText, setBibliografiaText] = useState('')
+
+  const [loading, setLoading] = useState(false)
+  const [statusMessage, setStatusMessage] = useState(null)
+  const [copiedMap, setCopiedMap] = useState({})
+  const [lastSaved, setLastSaved] = useState(null)
+  const [hydrated, setHydrated] = useState(false)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        console.log('guideForm loaded', parsed)
+        setAsignatura(parsed.asignatura || '')
+        setUnidad(parsed.unidad || '')
+        // soportar temas guardados como array de strings o array de objetos
+        if (parsed.temas && parsed.temas.length) {
+          if (typeof parsed.temas[0] === 'string') {
+            setTemas(parsed.temas.map((t, i) => ({ id: `tema-${i}-${Date.now()}`, text: t })))
+          } else {
+            setTemas(parsed.temas)
+          }
+        }
+        setSemanaInicio(parsed.semanaInicio || '')
+        // Restaurar secciones si existen en la carga previa
+        setDatosText(parsed.datos || '')
+        setDesarrolloText(parsed.desarrollo || '')
+        setActividadesText(parsed.actividades || '')
+  setRubricaText(sanitizeRubricaText(parsed.rubrica || ''))
+        setAutoevaluacionText(parsed.autoevaluacion || '')
+        setBibliografiaText(parsed.bibliografia || '')
+        if (parsed._savedAt) {
+          setLastSaved(parsed._savedAt)
+        }
+      }
+    } catch (err) {
+      console.warn('ls read failed', err)
+    }
+    const k = localStorage.getItem('groqApiKey') || ''
+    setGroqKey(k)
+    setEditingKey(!k) // si no hay clave, mostrar editor; si hay, ocultarlo
+    // indicar que la hidratación inicial terminó
+    setHydrated(true)
+  }, [])
+
+  useEffect(() => {
+    if (!hydrated) return // no escribir hasta haber cargado la snapshot inicial
+    try {
+      const payload = {
+        asignatura,
+        unidad,
+        temas,
+        semanaInicio,
+        // secciones guardadas
+        datos: datosText,
+        desarrollo: desarrolloText,
+        actividades: actividadesText,
+        rubrica: rubricaText,
+        autoevaluacion: autoevaluacionText,
+        bibliografia: bibliografiaText,
+        _savedAt: Date.now(),
+      }
+      localStorage.setItem(LS_KEY, JSON.stringify(payload))
+      setLastSaved(payload._savedAt)
+      console.debug('guideForm saved', payload)
+    } catch (err) {
+      console.warn('ls write failed', err)
+    }
+  }, [hydrated, asignatura, unidad, temas, semanaInicio, datosText, desarrolloText, actividadesText, rubricaText, autoevaluacionText, bibliografiaText])
+
+  // Guarda inmediatamente un "snapshot" parcial o completo en localStorage.
+  function saveSnapshot(partial = {}) {
+    try {
+      // Leer el estado actual y combinar con el parcial (partial prevalece)
+      const current = {
+        asignatura,
+        unidad,
+        temas,
+        semanaInicio,
+        datos: datosText,
+        desarrollo: desarrolloText,
+        actividades: actividadesText,
+        rubrica: rubricaText,
+        autoevaluacion: autoevaluacionText,
+        bibliografia: bibliografiaText,
+      }
+      const merged = { ...current, ...partial, _savedAt: Date.now() }
+      localStorage.setItem(LS_KEY, JSON.stringify(merged))
+      setLastSaved(merged._savedAt)
+      console.debug('guideForm snapshot saved', merged)
+    } catch (err) {
+      console.warn('saveSnapshot failed', err)
+    }
+  }
+
+  function updateTema(i, v) {
+    setTemas((prev) => {
+      const next = prev.map((t, idx) => (idx === i ? { ...t, text: v } : t))
+      // persistir inmediatamente
+      saveSnapshot({ temas: next })
+      return next
+    })
+  }
+  function addTema() {
+    setTemas((p) => {
+      const next = (p.length >= 4 ? p : [...p, { id: `tema-${Date.now()}`, text: '' }])
+      saveSnapshot({ temas: next })
+      return next
+    })
+  }
+  function removeTema(i) {
+    setTemas((p) => {
+      const next = p.filter((_, idx) => idx !== i)
+      saveSnapshot({ temas: next })
+      return next
+    })
+  }
+
+  function saveGroqKey() {
+    const val = groqKeyRef.current ? groqKeyRef.current.value : ''
+    try {
+      localStorage.setItem('groqApiKey', val)
+      setGroqKey(val)
+      setEditingKey(false)
+    } catch (err) {
+      console.warn('save key failed', err)
+    }
+  }
+  function deleteGroqKey() {
+    try {
+      localStorage.removeItem('groqApiKey')
+      setGroqKey('')
+      setEditingKey(true)
+    } catch (err) {
+      console.warn('delete key failed', err)
+    }
+  }
+
+  function clearSections() {
+    setDatosText('')
+    setDesarrolloText('')
+    setActividadesText('')
+    setRubricaText('')
+    setAutoevaluacionText('')
+    setBibliografiaText('')
+  }
+
+  function clearForm() {
+    try {
+      setAsignatura('')
+      setUnidad('')
+      setTemas([{ id: `tema-0-${Date.now()}`, text: '' }])
+      setSemanaInicio('')
+      clearSections()
+      localStorage.removeItem(LS_KEY)
+      setLastSaved(null)
+    } catch (err) {
+      console.warn('clear form failed', err)
+    }
+  }
+
+  // Llamar a saveSnapshot también desde los onChange de inputs principales
+
+  async function handleGenerate(e) {
+    e?.preventDefault()
+  setStatusMessage(null)
+    setLoading(true)
+    clearSections()
+    try {
+      const payload = {
+        subject: asignatura,
+        unit: unidad,
+        topics: temas.map((t) => t.text).filter((x) => x && x.trim()),
+        startWeek: semanaInicio,
+      }
+      const res = await generateGuide(payload)
+      // res is an object with keys: datos, desarrollo, actividades, rubrica, autoevaluacion, bibliografia
+      // Guardar directamente en estados individuales
+      setDatosText(res.datos || '')
+      setDesarrolloText(res.desarrollo || '')
+      setActividadesText(res.actividades || '')
+      const sanitizedRubrica = sanitizeRubricaText(res.rubrica || '')
+      setRubricaText(sanitizedRubrica)
+      setAutoevaluacionText(res.autoevaluacion || '')
+      setBibliografiaText(res.bibliografia || '')
+      // persistir inmediatamente las secciones generadas
+      saveSnapshot({
+        datos: res.datos || '',
+        desarrollo: res.desarrollo || '',
+        actividades: res.actividades || '',
+        rubrica: sanitizedRubrica || '',
+        autoevaluacion: res.autoevaluacion || '',
+        bibliografia: res.bibliografia || '',
+      })
+    } catch (err) {
+      console.error(err)
+      setStatusMessage(err?.message || String(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // copyPlain is defined at module scope
+  function handleCopy(key, text) {
+    if (!text) return
+    try {
+      copyPlain(text)
+      setCopiedMap((m) => ({ ...m, [key]: true }))
+      // limpiar aviso después de 2s
+      setTimeout(() => setCopiedMap((m) => ({ ...m, [key]: false })), 2000)
+    } catch (err) {
+      console.warn('copy failed', err)
+    }
+  }
+
+  function renderActividades() {
+    if (!actividadesText || !actividadesText.trim()) return <div className="text-gray-600">No hay actividades generadas.</div>
+    // dividir por doble salto de línea en bloques
+    const bloques = actividadesText.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean)
+    // para cada bloque, extraer campos por líneas que empiecen con 'Título:', 'Tema:', etc.
+    function parseActividad(block) {
+      const lines = block.split(/\n/).map(l => l.trim()).filter(Boolean)
+      const obj = {}
+      for (const ln of lines) {
+        const m = ln.match(/^(Título|Titulo|Tema|Descripción|Descripcion|Formato de entrega|Formato|Fecha de entrega|Fecha|Fuente bibliográfica|Fuente)\s*:\s*(.+)$/i)
+        if (m) {
+          const rawLabel = m[1].toLowerCase()
+          const label = rawLabel.normalize('NFD').replaceAll(/\p{Diacritic}/gu, '')
+          let key = 'extra'
+          if (label.startsWith('titu')) key = 'titulo'
+          else if (label.startsWith('tema')) key = 'tema'
+          else if (label.startsWith('descripcion')) key = 'descripcion'
+          else if (label.startsWith('formato')) key = 'formato'
+          else if (label.startsWith('fecha')) key = 'fecha'
+          else if (label.startsWith('fuente')) key = 'fuente'
+          obj[key] = m[2]
+        } else {
+          obj.descripcion = obj.descripcion ? obj.descripcion + ' ' + ln : ln
+        }
+      }
+      return obj
+    }
+
+    return (
+      <div className="space-y-4">
+        {bloques.map((b, idx) => {
+          const obj = parseActividad(b)
+          const keyId = 'act-' + hashCode(b)
+          return (
+            <div key={keyId} className="p-4 border rounded-lg bg-white shadow-sm">
+                  <div>
+                    <h4 className="font-semibold text-lg text-sky-700">Actividad {idx + 1}</h4>
+                    {obj.descripcion ? (
+                      <div className="mt-2 text-gray-700">{obj.descripcion}</div>
+                    ) : (
+                      // si no hay descripcion, intentar usar título o tema como fallback
+                      <div className="mt-2 text-gray-700">{obj.titulo || obj.tema || ''}</div>
+                    )}
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {obj.formato && (
+                        <div><span className="font-semibold text-violet-700">Formato: </span><span className="text-slate-800">{obj.formato}</span></div>
+                      )}
+                      {obj.fecha && (
+                        <div><span className="font-semibold text-red-600">Fecha: </span><span className="text-slate-800">{obj.fecha}</span></div>
+                      )}
+                      {obj.fuente && (
+                        <div className="sm:col-span-2"><span className="font-semibold text-amber-700">Fuente: </span><span className="text-slate-800">{obj.fuente}</span></div>
+                      )}
+                    </div>
+                  </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+
+
+  function copyRubricaTable() {
+    const parsed = parseRubrica(rubricaText)
+    // construir tabla Markdown
+    const header = ['Criterio', 'Muy bien (2.5)', 'Bien (1.75)', 'En progreso (1)']
+    const rows = parsed.map(p => [p.criterion, p.muyBien || '-', p.bien || '-', p.enProgreso || '-'])
+  const mdHeader = '| ' + header.join(' | ') + ' |\n' + '| ' + header.map(() => '---').join(' | ') + ' |'
+  const mdRows = rows.map(r => '| ' + r.join(' | ') + ' |').join('\n')
+  const out = mdHeader + (mdRows ? '\n' + mdRows : '')
+    try {
+      navigator.clipboard.writeText(out)
+      setCopiedMap((m) => ({ ...m, rubrica: true }))
+      setTimeout(() => setCopiedMap((m) => ({ ...m, rubrica: false })), 2000)
+    } catch (err) {
+      console.warn('copy rubrica failed', err)
+    }
+  }
+
+  function renderRubrica() {
+    const parsed = parseRubrica(rubricaText)
+    console.log('parsed rubrica', parsed)
+    if (!parsed.length) return <div className="text-gray-600">No hay rúbrica generada.</div>
+    return (
+      <div className="overflow-x-auto">
+        <table className="min-w-full table-auto border-collapse">
+          <thead>
+            <tr className="bg-slate-100">
+              <th className="text-left px-4 py-2 border">Criterio</th>
+              <th className="text-left px-4 py-2 border">Muy bien<br/><span className="text-sm text-gray-500">2.5 pts</span></th>
+              <th className="text-left px-4 py-2 border">Bien<br/><span className="text-sm text-gray-500">1.75 pts</span></th>
+              <th className="text-left px-4 py-2 border">En progreso<br/><span className="text-sm text-gray-500">1 pt</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {parsed.map((p) => {
+              const keyRow = 'rub-' + hashCode(p.criterion)
+              const i = hashCode(p.criterion) % 2
+              return (
+                <tr key={keyRow} className={i === 0 ? 'bg-white' : 'bg-slate-50'}>
+                <td className="px-4 py-3 align-top border font-semibold text-slate-800">{p.criterion}</td>
+                <td className="px-4 py-3 align-top border text-gray-700 whitespace-pre-wrap">{p.muyBien || '-'}</td>
+                <td className="px-4 py-3 align-top border text-gray-700 whitespace-pre-wrap">{p.bien || '-'}</td>
+                <td className="px-4 py-3 align-top border text-gray-700 whitespace-pre-wrap">{p.enProgreso || '-'}</td>
+              </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  // Autoevaluación renderizada abajo
+
+  function renderAutoevaluacion() {
+    const parsed = parseAutoevaluacion(autoevaluacionText)
+    if (!parsed.length) return <div className="text-gray-600">No hay preguntas de autoevaluación.</div>
+    return (
+      <div className="space-y-4">
+        {parsed.map((q, idx) => {
+          const qKey = 'aq-' + hashCode(q.question + (q.options.map(o => o.label + o.text).join('|')))
+          return (
+            <div key={qKey} className="p-3 border rounded bg-white">
+              <div className="font-semibold text-slate-800">{idx + 1}. {q.question}</div>
+              <ul className="mt-2 space-y-1">
+                {q.options.map((o) => (
+                  <li key={qKey + '-' + o.label} className={`p-2 rounded ${o.correct ? 'bg-green-50 border-l-4 border-green-400' : ''}`}>
+                    <span className="font-semibold mr-2">{o.label})</span>
+                    <span className="text-slate-800">{o.text}{o.correct ? <span className="ml-3 text-sm font-medium text-green-700">✓ Correcta</span> : null}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+
+  return (
+    <div className="max-w-3xl mx-auto p-4">
+      <form onSubmit={handleGenerate} className="space-y-4">
+        <div className="border rounded p-3">
+          <label htmlFor="groqKeyInput" className="block text-sm font-medium">Clave API Groq</label>
+          {editingKey ? (
+            <div className="mt-2 flex gap-2">
+              <input id="groqKeyInput" ref={groqKeyRef} defaultValue={groqKey} className="border rounded p-2 flex-1" placeholder="Ingresa tu Groq API Key" />
+              <button type="button" className="px-3 py-2 bg-green-600 text-white rounded" onClick={saveGroqKey}>Guardar</button>
+              <button type="button" className="px-3 py-2 border rounded" onClick={() => { setEditingKey(false); if (groqKeyRef.current) groqKeyRef.current.value = groqKey }}>Cancelar</button>
+            </div>
+          ) : (
+            <div className="mt-2 flex gap-2">
+              <button type="button" className="px-3 py-2 bg-amber-500 text-white rounded" onClick={() => setEditingKey(true)}>Cambiar clave</button>
+              <button type="button" className="text-sm text-red-600 underline" onClick={deleteGroqKey}>Eliminar</button>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label htmlFor="asignatura" className="block text-sm font-medium">Asignatura</label>
+          <input id="asignatura" className="mt-1 block w-full border rounded p-2" value={asignatura} onChange={(e) => { setAsignatura(e.target.value); saveSnapshot({ asignatura: e.target.value }); }} />
+        </div>
+
+        <div>
+          <label htmlFor="unidad" className="block text-sm font-medium">Unidad</label>
+          <input id="unidad" className="mt-1 block w-full border rounded p-2" value={unidad} onChange={(e) => { setUnidad(e.target.value); saveSnapshot({ unidad: e.target.value }); }} />
+        </div>
+
+        <div>
+          <label htmlFor={temas[0]?.id || 'tema-0'} className="block text-sm font-medium">Temas (hasta 4)</label>
+          <div className="grid grid-cols-2 gap-2 mt-1">
+            {temas.map((t, i) => (
+              <div key={t.id} className="flex gap-2">
+                <input id={t.id} className="border rounded p-2 flex-1" value={t.text} onChange={(e) => updateTema(i, e.target.value)} placeholder={`Tema ${i + 1}`} />
+                {temas.length > 1 && (
+                  <button type="button" className="px-2 py-1 bg-red-200 rounded" onClick={() => removeTema(i)}>×</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-2">
+            <button type="button" onClick={addTema} className="px-3 py-1 bg-gray-100 rounded" disabled={temas.length >= 4}>Añadir tema</button>
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="semanaInicio" className="block text-sm font-medium">Semana de inicio</label>
+          <input id="semanaInicio" className="mt-1 block w-32 border rounded p-2" value={semanaInicio} onChange={(e) => { setSemanaInicio(e.target.value); saveSnapshot({ semanaInicio: e.target.value }); }} />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded">{loading ? 'Generando...' : 'Generar guía'}</button>
+          <button type="button" onClick={() => {
+            // descargar las secciones concatenadas
+            const content = `--DATOS--\n${datosText}\n\n--DESARROLLO--\n${desarrolloText}\n\n--ACTIVIDADES--\n${actividadesText}\n\n--RUBRICA--\n${rubricaText}\n\n--AUTOEVALUACION--\n${autoevaluacionText}\n\n--BIBLIOGRAFIA--\n${bibliografiaText}`
+            const blob = new Blob([content], { type: 'text/plain' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `${asignatura || 'guia'}.txt`
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            URL.revokeObjectURL(url)
+          }} className="px-3 py-2 bg-gray-200 rounded">Descargar .txt</button>
+          <button type="button" onClick={clearForm} className="px-3 py-2 bg-red-600 text-white rounded">Limpiar formulario</button>
+        </div>
+      </form>
+  {statusMessage && <div className="mt-4 text-red-600">{statusMessage}</div>}
+  {lastSaved && (
+    <div className="mt-2 text-sm text-gray-500">Guardado localmente: {new Date(lastSaved).toLocaleString()}</div>
+  )}
+
+  <div className="mt-6 space-y-6">
+        <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-slate-50 shadow-sm">
+          <div className="flex justify-between items-start">
+            <div>
+              <h3 className="font-semibold text-lg text-left text-sky-700">DATOS</h3>
+              <p className="text-sm text-gray-500 mt-1">Información general y metadatos de la guía</p>
+            </div>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['datos'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={() => handleCopy('datos', datosText)}
+            >
+              {copiedMap['datos'] ? 'Copiado' : 'Copiar texto'}
+            </button>
+          </div>
+          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left shadow-sm">
+            {datosText || <span className="text-gray-500">Aún no hay información de datos. Genera la guía para ver los detalles.</span>}
+          </div>
+        </section>
+
+        <section className="rounded-lg border p-4 bg-white shadow-sm">
+          <div className="flex justify-between items-start">
+            <div>
+              <h3 className="font-semibold text-lg text-left text-violet-700">DESARROLLO</h3>
+              <p className="text-sm text-gray-500 mt-1">Estructura del desarrollo de la unidad y actividades de aprendizaje</p>
+            </div>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['desarrollo'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={() => handleCopy('desarrollo', desarrolloText)}
+            >
+              {copiedMap['desarrollo'] ? 'Copiado' : 'Copiar texto'}
+            </button>
+          </div>
+          <div className="mt-4 bg-slate-50 border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left">
+            {desarrolloText || <span className="text-gray-500">El desarrollo aparecerá aquí después de generar la guía.</span>}
+          </div>
+        </section>
+
+        <section className="border rounded p-4">
+          <div className="flex justify-between items-start">
+            <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">ACTIVIDADES</h3>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['actividades'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={() => handleCopy('actividades', actividadesText)}
+            >
+              {copiedMap['actividades'] ? 'Copiado' : 'Copiar texto'}
+            </button>
+          </div>
+          <div className="mt-3 text-gray-800 text-left">{renderActividades()}</div>
+        </section>
+
+        <section className="border rounded p-4">
+          <div className="flex justify-between items-start">
+            <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">RÚBRICA</h3>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['rubrica'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={copyRubricaTable}
+            >
+              {copiedMap['rubrica'] ? 'Copiado' : 'Copiar tabla'}
+            </button>
+          </div>
+          <div className="mt-3 text-gray-800 text-left">{renderRubrica()}</div>
+        </section>
+
+        <section className="border rounded p-4">
+          <div className="flex justify-between items-start">
+            <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">AUTOEVALUACIÓN</h3>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['autoevaluacion'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={() => handleCopy('autoevaluacion', autoevaluacionText)}
+            >
+              {copiedMap['autoevaluacion'] ? 'Copiado' : 'Copiar texto'}
+            </button>
+          </div>
+          <div className="mt-3 text-gray-800 text-left">{renderAutoevaluacion()}</div>
+        </section>
+
+        <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-amber-50 shadow-sm">
+          <div className="flex justify-between items-start">
+            <div>
+              <h3 className="font-semibold text-lg text-left text-amber-700">BIBLIOGRAFÍA</h3>
+              <p className="text-sm text-gray-500 mt-1">Fuentes y referencias recomendadas (preferir fuentes en español)</p>
+            </div>
+            <button
+              className={`px-3 py-1 rounded text-sm transition ${copiedMap['bibliografia'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+              onClick={() => handleCopy('bibliografia', bibliografiaText)}
+            >
+              {copiedMap['bibliografia'] ? 'Copiado' : 'Copiar texto'}
+            </button>
+          </div>
+          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left">
+            {bibliografiaText || <span className="text-gray-500">No hay bibliografía aún. Pide generar la guía para obtener fuentes sugeridas.</span>}
+          </div>
+        </section>
+
+      </div>
+    </div>
+  )
+}
