@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState, useRef, useMemo } from 'react'
 import generateGuide from '../services/groqService'
 
 const LS_KEY = 'guideForm_v1'
@@ -71,6 +71,17 @@ function parseRubricaBlocks(text) {
       const n = Number(m[1])
       const txtN = m[2].trim()
       niveles[n] = niveles[n] ? niveles[n] + ' ' + txtN : txtN
+    }
+    // También soportar líneas etiquetadas: 'Muy bien: ...', 'Bien: ...', 'En progreso: ...'
+    for (const ln of lines) {
+      const mm = ln.match(/^(Muy bien|Muybien|Bien|En progreso|Enprogreso)\s*[:\-–]?\s*(.+)$/i)
+      if (mm) {
+        const label = mm[1].toLowerCase().replace(/\s+/g, '')
+        const val = mm[2].trim()
+        if (label.startsWith('muy')) niveles[3] = niveles[3] ? niveles[3] + ' ' + val : val
+        else if (label.startsWith('bien')) niveles[2] = niveles[2] ? niveles[2] + ' ' + val : val
+        else if (label.startsWith('en')) niveles[1] = niveles[1] ? niveles[1] + ' ' + val : val
+      }
     }
     items.push({ criterion: title, niveles })
   }
@@ -168,6 +179,12 @@ function parseAutoevaluacion(text) {
   }
   return questions
 }
+  function makeSearchUrlForRef(ref) {
+  // eliminar comillas y paréntesis y codificar (usar character class)
+  const cleaned = ref.replaceAll(/["'()]/g, '')
+  const q = encodeURIComponent(cleaned)
+  return `https://www.google.com/search?q=${q}`
+}
 
 // Sanitizar texto de rúbrica: eliminar paréntesis con puntuaciones como '(4 puntos)', '(2.5 pts)', etc.
 function sanitizeRubricaText(text) {
@@ -183,6 +200,7 @@ function sanitizeRubricaText(text) {
 export default function GuideForm() {
   const [asignatura, setAsignatura] = useState('')
   const [unidad, setUnidad] = useState('')
+  const [guideNumber, setGuideNumber] = useState('')
   const [temas, setTemas] = useState(() => [{ id: `tema-0-${Date.now()}`, text: '' }])
   const [semanaInicio, setSemanaInicio] = useState('')
   const [groqKey, setGroqKey] = useState('')
@@ -203,6 +221,9 @@ export default function GuideForm() {
   const [lastSaved, setLastSaved] = useState(null)
   const [hydrated, setHydrated] = useState(false)
 
+  // clave estable para dependencias basada en el contenido de temas (evita pasar el array/objetos directamente)
+  const temasKey = useMemo(() => (temas && Array.isArray(temas) ? temas.map(t => String(t?.text || '')).join('|') : ''), [temas])
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY)
@@ -211,6 +232,7 @@ export default function GuideForm() {
         console.log('guideForm loaded', parsed)
         setAsignatura(parsed.asignatura || '')
         setUnidad(parsed.unidad || '')
+        setGuideNumber(parsed.guideNumber || parsed.guiaNumero || '')
         // soportar temas guardados como array de strings o array de objetos
         if (parsed.temas && parsed.temas.length) {
           if (typeof parsed.temas[0] === 'string') {
@@ -247,6 +269,7 @@ export default function GuideForm() {
       const payload = {
         asignatura,
         unidad,
+        guideNumber,
         temas,
         semanaInicio,
         // secciones guardadas
@@ -264,7 +287,7 @@ export default function GuideForm() {
     } catch (err) {
       console.warn('ls write failed', err)
     }
-  }, [hydrated, asignatura, unidad, temas, semanaInicio, datosText, desarrolloText, actividadesText, rubricaText, autoevaluacionText, bibliografiaText])
+  }, [hydrated, asignatura, unidad, temas, temasKey, semanaInicio, datosText, desarrolloText, actividadesText, rubricaText, autoevaluacionText, bibliografiaText, guideNumber])
 
   // Guarda inmediatamente un "snapshot" parcial o completo en localStorage.
   function saveSnapshot(partial = {}) {
@@ -283,6 +306,8 @@ export default function GuideForm() {
         bibliografia: bibliografiaText,
       }
       const merged = { ...current, ...partial, _savedAt: Date.now() }
+      // include guideNumber if present
+      if (current.guideNumber || partial.guideNumber) merged.guideNumber = partial.guideNumber || current.guideNumber
       localStorage.setItem(LS_KEY, JSON.stringify(merged))
       setLastSaved(merged._savedAt)
       console.debug('guideForm snapshot saved', merged)
@@ -368,6 +393,7 @@ export default function GuideForm() {
       const payload = {
         subject: asignatura,
         unit: unidad,
+        guideNumber,
         topics: temas.map((t) => t.text).filter((x) => x && x.trim()),
         startWeek: semanaInicio,
       }
@@ -378,7 +404,12 @@ export default function GuideForm() {
       setDesarrolloText(res.desarrollo || '')
       setActividadesText(res.actividades || '')
       const sanitizedRubrica = sanitizeRubricaText(res.rubrica || '')
-      setRubricaText(sanitizedRubrica)
+      // Si la API no devuelve rúbrica, insertar una plantilla por defecto para que se muestre
+      const finalRubrica = (sanitizedRubrica && sanitizedRubrica.trim()) ? sanitizedRubrica : `| Criterio | Muy bien | Bien | En progreso |\n| --- | --- | --- | --- |\n| Exactitud de los cálculos | - | - | - |\n| Presentación y claridad | - | - | - |\n| Interpretación geométrica | - | - | - |\n| Aplicación de técnicas de integración | - | - | - |`
+      setRubricaText(finalRubrica)
+      if (!sanitizedRubrica || !sanitizedRubrica.trim()) {
+        setStatusMessage('Atención: la API no devolvió rúbrica; se ha insertado una plantilla por defecto.')
+      }
       setAutoevaluacionText(res.autoevaluacion || '')
       setBibliografiaText(res.bibliografia || '')
       // persistir inmediatamente las secciones generadas
@@ -389,6 +420,7 @@ export default function GuideForm() {
         rubrica: sanitizedRubrica || '',
         autoevaluacion: res.autoevaluacion || '',
         bibliografia: res.bibliografia || '',
+        guideNumber: guideNumber || ''
       })
     } catch (err) {
       console.error(err)
@@ -409,6 +441,49 @@ export default function GuideForm() {
     } catch (err) {
       console.warn('copy failed', err)
     }
+  }
+
+  function renderDatos() {
+    // Build canonical meta entries from form state
+    const metaEntries = []
+    if (guideNumber && guideNumber.trim()) metaEntries.push({ label: 'Número de guía', value: guideNumber.trim() })
+    if (asignatura && asignatura.trim()) metaEntries.push({ label: 'Asignatura', value: asignatura.trim() })
+    if (unidad && unidad.trim()) metaEntries.push({ label: 'Unidad de estudio', value: unidad.trim() })
+    const temasList = temas && Array.isArray(temas) ? temas.map(t => t.text).filter(Boolean) : []
+    if (temasList.length) metaEntries.push({ label: 'Temas', value: temasList.join('; ') })
+
+    // parse datosText into lines but avoid duplicating meta entries
+    const lines = (datosText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    const parsed = lines.map((ln) => {
+      const m = ln.match(/^([^:]+)\s*:\s*(.+)$/)
+      if (m) return { label: m[1].trim(), value: m[2].trim() }
+      return { label: null, value: ln }
+    })
+    // filter parsed to exclude those that duplicate meta labels
+    const metaLabels = new Set(metaEntries.map(e => e.label.toLowerCase()))
+    const parsedFiltered = parsed.filter(p => !(p.label && metaLabels.has(p.label.toLowerCase())))
+
+    // if no content at all, show placeholder
+    if (metaEntries.length === 0 && parsedFiltered.length === 0) return <div className="text-gray-500">Aún no hay información de datos. Genera la guía para ver los detalles.</div>
+
+    return (
+      <div className="space-y-2 text-left">
+        {metaEntries.map((p, i) => (
+          <div key={'meta-' + i} className="bg-white border rounded-md p-3 shadow-sm text-left">
+            <div className="text-sm text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800">{p.value}</span></div>
+          </div>
+        ))}
+        {parsedFiltered.map((p, i) => (
+          <div key={'d-' + i} className="bg-white border rounded-md p-3 shadow-sm text-left">
+            {p.label ? (
+              <div className="text-sm text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800">{p.value}</span></div>
+            ) : (
+              <div className="text-slate-800">{p.value}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    )
   }
 
   function renderActividades() {
@@ -553,9 +628,32 @@ export default function GuideForm() {
     )
   }
 
+  function renderBibliografia() {
+    if (!bibliografiaText || !bibliografiaText.trim()) return <div className="text-gray-500">No hay bibliografía aún. Pide generar la guía para obtener fuentes sugeridas.</div>
+    // dividir por líneas y procesar cada referencia
+    const lines = bibliografiaText.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    return (
+      <ol className="list-decimal pl-5 space-y-2">
+        {lines.map((ln, idx) => {
+          
+          const display = ln.replace(/https?:\/\/[^\s]+/i, '').trim()
+          const href = makeSearchUrlForRef(display)
+          return (
+            <li key={'bib-' + idx} className="">
+              <a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">
+                {display || href}
+              </a>
+            </li>
+          )
+        })}
+      </ol>
+    )
+  }
+
 
   return (
     <div className="max-w-3xl mx-auto p-4">
+      <h1 className="text-2xl font-bold text-center mb-4">Guías de Estudio</h1>
       <form onSubmit={handleGenerate} className="space-y-4">
         <div className="border rounded p-3">
           <label htmlFor="groqKeyInput" className="block text-sm font-medium">Clave API Groq</label>
@@ -576,6 +674,11 @@ export default function GuideForm() {
         <div>
           <label htmlFor="asignatura" className="block text-sm font-medium">Asignatura</label>
           <input id="asignatura" className="mt-1 block w-full border rounded p-2" value={asignatura} onChange={(e) => { setAsignatura(e.target.value); saveSnapshot({ asignatura: e.target.value }); }} />
+        </div>
+
+        <div>
+          <label htmlFor="guideNumber" className="block text-sm font-medium">Número de guía</label>
+          <input id="guideNumber" className="mt-1 block w-full border rounded p-2" value={guideNumber} onChange={(e) => { setGuideNumber(e.target.value); saveSnapshot({ guideNumber: e.target.value }); }} placeholder="Ej. guia-1234" />
         </div>
 
         <div>
@@ -620,6 +723,40 @@ export default function GuideForm() {
             a.remove()
             URL.revokeObjectURL(url)
           }} className="px-3 py-2 bg-gray-200 rounded">Descargar .txt</button>
+          <button type="button" onClick={() => {
+            // construir objeto JSON con la estructura esperada por GuideViewer
+            const guideId = `guia-${Date.now()}`
+            let titleStr = ''
+            if (asignatura) {
+              titleStr = asignatura
+              if (unidad) titleStr += ' - ' + unidad
+            } else {
+              titleStr = unidad || guideId
+            }
+            const guideObj = {
+              id: guideId,
+              titulo: titleStr,
+              asignatura: asignatura || '',
+              unidad: unidad || '',
+              temas: temas.map(t => t.text).filter(Boolean),
+              datos: datosText || '',
+              desarrollo: desarrolloText || '',
+              actividades: actividadesText || '',
+              rubrica: rubricaText || '',
+              autoevaluacion: autoevaluacionText || '',
+              bibliografia: bibliografiaText || ''
+            }
+            const jsonStr = JSON.stringify(guideObj, null, 2)
+            const blobJson = new Blob([jsonStr], { type: 'application/json' })
+            const urlJson = URL.createObjectURL(blobJson)
+            const aJson = document.createElement('a')
+            aJson.href = urlJson
+            aJson.download = `${guideId}.json`
+            document.body.appendChild(aJson)
+            aJson.click()
+            aJson.remove()
+            URL.revokeObjectURL(urlJson)
+          }} className="px-3 py-2 bg-indigo-500 text-white rounded">Descargar JSON</button>
           <button type="button" onClick={clearForm} className="px-3 py-2 bg-red-600 text-white rounded">Limpiar formulario</button>
         </div>
       </form>
@@ -629,7 +766,7 @@ export default function GuideForm() {
   )}
 
   <div className="mt-6 space-y-6">
-        <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-slate-50 shadow-sm">
+  <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-cyan-50 shadow-sm ring-1 ring-slate-100">
           <div className="flex justify-between items-start">
             <div>
               <h3 className="font-semibold text-lg text-left text-sky-700">DATOS</h3>
@@ -642,12 +779,12 @@ export default function GuideForm() {
               {copiedMap['datos'] ? 'Copiado' : 'Copiar texto'}
             </button>
           </div>
-          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left shadow-sm">
-            {datosText || <span className="text-gray-500">Aún no hay información de datos. Genera la guía para ver los detalles.</span>}
+          <div className="mt-4">
+            {renderDatos()}
           </div>
         </section>
 
-        <section className="rounded-lg border p-4 bg-white shadow-sm">
+  <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-violet-50 shadow-sm">
           <div className="flex justify-between items-start">
             <div>
               <h3 className="font-semibold text-lg text-left text-violet-700">DESARROLLO</h3>
@@ -665,7 +802,7 @@ export default function GuideForm() {
           </div>
         </section>
 
-        <section className="border rounded p-4">
+  <section className="border rounded p-4 bg-gradient-to-br from-white to-emerald-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">ACTIVIDADES</h3>
             <button
@@ -678,7 +815,7 @@ export default function GuideForm() {
           <div className="mt-3 text-gray-800 text-left">{renderActividades()}</div>
         </section>
 
-        <section className="border rounded p-4">
+  <section className="border rounded p-4 bg-gradient-to-br from-white to-rose-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">RÚBRICA</h3>
             <button
@@ -691,7 +828,7 @@ export default function GuideForm() {
           <div className="mt-3 text-gray-800 text-left">{renderRubrica()}</div>
         </section>
 
-        <section className="border rounded p-4">
+  <section className="border rounded p-4 bg-gradient-to-br from-white to-amber-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">AUTOEVALUACIÓN</h3>
             <button
@@ -717,8 +854,8 @@ export default function GuideForm() {
               {copiedMap['bibliografia'] ? 'Copiado' : 'Copiar texto'}
             </button>
           </div>
-          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left">
-            {bibliografiaText || <span className="text-gray-500">No hay bibliografía aún. Pide generar la guía para obtener fuentes sugeridas.</span>}
+          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 text-left">
+            {renderBibliografia()}
           </div>
         </section>
 

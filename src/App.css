@@ -40,3 +40,26 @@
 .read-the-docs {
   color: #888;
 }
+
+/* Print styles for exporting the guide to PDF */
+@media print {
+  /* hide everything by default */
+  body * {
+    visibility: hidden !important;
+  }
+  /* show only the printable container */
+  .printable, .printable * {
+    visibility: visible !important;
+  }
+  /* position the printable container at the top-left for the print layout */
+  .printable {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  /* avoid background colors from Tailwind during print (most browsers ignore bg by default) */
+  .no-print-bg { background: transparent !important; }
+}
