@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react'
 import generateGuide from '../services/groqService'
+import normalizeGuide from '../services/normalizeGuide'
 
 const LS_KEY = 'guideForm_v1'
 
@@ -179,12 +180,7 @@ function parseAutoevaluacion(text) {
   }
   return questions
 }
-  function makeSearchUrlForRef(ref) {
-  // eliminar comillas y paréntesis y codificar (usar character class)
-  const cleaned = ref.replaceAll(/["'()]/g, '')
-  const q = encodeURIComponent(cleaned)
-  return `https://www.google.com/search?q=${q}`
-}
+  // nota: makeSearchUrlForRef se define en GuideViewer y no es necesario aquí
 
 // Sanitizar texto de rúbrica: eliminar paréntesis con puntuaciones como '(4 puntos)', '(2.5 pts)', etc.
 function sanitizeRubricaText(text) {
@@ -214,12 +210,49 @@ export default function GuideForm() {
   const [rubricaText, setRubricaText] = useState('')
   const [autoevaluacionText, setAutoevaluacionText] = useState('')
   const [bibliografiaText, setBibliografiaText] = useState('')
+  const [bibliografiaItems, setBibliografiaItems] = useState([]) // [{ text, link }]
+  const [imageUrl, setImageUrl] = useState('') // URL de la carátula
+  const [editingImage, setEditingImage] = useState(false)
+  const [showImageModal, setShowImageModal] = useState(false)
+  
 
   const [loading, setLoading] = useState(false)
   const [statusMessage, setStatusMessage] = useState(null)
   const [copiedMap, setCopiedMap] = useState({})
   const [lastSaved, setLastSaved] = useState(null)
   const [hydrated, setHydrated] = useState(false)
+  // control de modo edición por sección
+  const [editingSections, setEditingSections] = useState({
+    datos: false,
+    desarrollo: false,
+    actividades: false,
+    rubrica: false,
+    autoevaluacion: false,
+    bibliografia: false
+  })
+
+  function toggleEditing(section) {
+    setEditingSections((prev) => {
+      const next = { ...prev, [section]: !prev[section] }
+      // if turning edit mode off, persist immediately
+      if (!next[section]) {
+        try {
+          saveSnapshot({
+            datos: section === 'datos' ? datosText : undefined,
+            desarrollo: section === 'desarrollo' ? desarrolloText : undefined,
+            actividades: section === 'actividades' ? actividadesText : undefined,
+            rubrica: section === 'rubrica' ? rubricaText : undefined,
+            autoevaluacion: section === 'autoevaluacion' ? autoevaluacionText : undefined,
+            // persistir la estructura enriquecida si existe
+            bibliografia: section === 'bibliografia' ? ((bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems : bibliografiaText) : undefined,
+          })
+        } catch (err) {
+          console.warn('save on toggle failed', err)
+        }
+      }
+      return next
+    })
+  }
 
   // clave estable para dependencias basada en el contenido de temas (evita pasar el array/objetos directamente)
   const temasKey = useMemo(() => (temas && Array.isArray(temas) ? temas.map(t => String(t?.text || '')).join('|') : ''), [temas])
@@ -241,14 +274,37 @@ export default function GuideForm() {
             setTemas(parsed.temas)
           }
         }
-        setSemanaInicio(parsed.semanaInicio || '')
+    setSemanaInicio(parsed.semanaInicio || '')
+    setImageUrl(parsed.imageUrl || '')
+    // si no hay imagen, dejar el input visible; si existe, ocultarlo inicialmente
+    setEditingImage(!parsed.imageUrl)
         // Restaurar secciones si existen en la carga previa
         setDatosText(parsed.datos || '')
         setDesarrolloText(parsed.desarrollo || '')
         setActividadesText(parsed.actividades || '')
   setRubricaText(sanitizeRubricaText(parsed.rubrica || ''))
         setAutoevaluacionText(parsed.autoevaluacion || '')
-        setBibliografiaText(parsed.bibliografia || '')
+        // bibliografia puede venir como string (líneas) o como array de objetos {text, link}
+        if (parsed.bibliografia) {
+          if (Array.isArray(parsed.bibliografia)) {
+            setBibliografiaItems(parsed.bibliografia)
+            // también mantener string para compatibilidad con vistas antiguas
+            setBibliografiaText((parsed.bibliografia || []).map(b => b.text || '').join('\n'))
+          } else if (typeof parsed.bibliografia === 'string') {
+            setBibliografiaText(parsed.bibliografia)
+            // convertir líneas en items: extraer URL si existe en la línea
+            const lines = parsed.bibliografia.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+            const items = lines.map((ln) => {
+              const m = ln.match(/(https?:\/\/[^\s]+)/i)
+              const url = m ? m[1] : null
+              const display = url ? ln.replace(url, '').trim() : ln
+              return { text: display, link: url || '' }
+            })
+            setBibliografiaItems(items)
+          }
+        } else {
+          setBibliografiaText('')
+        }
         if (parsed._savedAt) {
           setLastSaved(parsed._savedAt)
         }
@@ -272,13 +328,15 @@ export default function GuideForm() {
         guideNumber,
         temas,
         semanaInicio,
+        imageUrl,
         // secciones guardadas
         datos: datosText,
         desarrollo: desarrolloText,
         actividades: actividadesText,
         rubrica: rubricaText,
         autoevaluacion: autoevaluacionText,
-        bibliografia: bibliografiaText,
+        // preferir guardar la estructura enriquecida (items con link) cuando exista
+        bibliografia: (bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems : bibliografiaText,
         _savedAt: Date.now(),
       }
       localStorage.setItem(LS_KEY, JSON.stringify(payload))
@@ -287,7 +345,7 @@ export default function GuideForm() {
     } catch (err) {
       console.warn('ls write failed', err)
     }
-  }, [hydrated, asignatura, unidad, temas, temasKey, semanaInicio, datosText, desarrolloText, actividadesText, rubricaText, autoevaluacionText, bibliografiaText, guideNumber])
+  }, [hydrated, asignatura, unidad, temas, temasKey, semanaInicio, datosText, desarrolloText, actividadesText, rubricaText, autoevaluacionText, bibliografiaText, bibliografiaItems, guideNumber, imageUrl])
 
   // Guarda inmediatamente un "snapshot" parcial o completo en localStorage.
   function saveSnapshot(partial = {}) {
@@ -296,14 +354,16 @@ export default function GuideForm() {
       const current = {
         asignatura,
         unidad,
+        guideNumber,
         temas,
         semanaInicio,
+        imageUrl,
         datos: datosText,
         desarrollo: desarrolloText,
         actividades: actividadesText,
         rubrica: rubricaText,
         autoevaluacion: autoevaluacionText,
-        bibliografia: bibliografiaText,
+        bibliografia: (bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems : bibliografiaText,
       }
       const merged = { ...current, ...partial, _savedAt: Date.now() }
       // include guideNumber if present
@@ -338,7 +398,6 @@ export default function GuideForm() {
       return next
     })
   }
-
   function saveGroqKey() {
     const val = groqKeyRef.current ? groqKeyRef.current.value : ''
     try {
@@ -349,6 +408,7 @@ export default function GuideForm() {
       console.warn('save key failed', err)
     }
   }
+
   function deleteGroqKey() {
     try {
       localStorage.removeItem('groqApiKey')
@@ -366,6 +426,7 @@ export default function GuideForm() {
     setRubricaText('')
     setAutoevaluacionText('')
     setBibliografiaText('')
+    setBibliografiaItems([])
   }
 
   function clearForm() {
@@ -398,20 +459,70 @@ export default function GuideForm() {
         startWeek: semanaInicio,
       }
       const res = await generateGuide(payload)
-      // res is an object with keys: datos, desarrollo, actividades, rubrica, autoevaluacion, bibliografia
-      // Guardar directamente en estados individuales
-      setDatosText(res.datos || '')
-      setDesarrolloText(res.desarrollo || '')
-      setActividadesText(res.actividades || '')
-      const sanitizedRubrica = sanitizeRubricaText(res.rubrica || '')
+        // Depurar/normalizar la salida de la API antes de usarla en el formulario
+        const norm = normalizeGuide(res || {}, { subject: asignatura, unit: unidad, guideNumber, topics: temas.map((t) => t.text).filter(Boolean) })
+        // norm contiene: datos, desarrollo, actividades, rubrica, autoevaluacion, bibliografia_items, bibliografia
+        // Guardar directamente en estados individuales
+        setDatosText(norm.datos || '')
+        setDesarrolloText(norm.desarrollo || '')
+        setActividadesText(norm.actividades || '')
+        const sanitizedRubrica = sanitizeRubricaText(norm.rubrica || '')
       // Si la API no devuelve rúbrica, insertar una plantilla por defecto para que se muestre
       const finalRubrica = (sanitizedRubrica && sanitizedRubrica.trim()) ? sanitizedRubrica : `| Criterio | Muy bien | Bien | En progreso |\n| --- | --- | --- | --- |\n| Exactitud de los cálculos | - | - | - |\n| Presentación y claridad | - | - | - |\n| Interpretación geométrica | - | - | - |\n| Aplicación de técnicas de integración | - | - | - |`
       setRubricaText(finalRubrica)
       if (!sanitizedRubrica || !sanitizedRubrica.trim()) {
         setStatusMessage('Atención: la API no devolvió rúbrica; se ha insertado una plantilla por defecto.')
       }
-      setAutoevaluacionText(res.autoevaluacion || '')
-      setBibliografiaText(res.bibliografia || '')
+      setAutoevaluacionText(norm.autoevaluacion || '')
+      // convertir bibliografía devuelta por la API a items {text, link}
+      // usar la bibliografía ya normalizada por normalizeGuide
+      let bibliografiaForSave = null
+      if (Array.isArray(norm.bibliografia_items) && norm.bibliografia_items.length) {
+        setBibliografiaItems(norm.bibliografia_items)
+        setBibliografiaText((norm.bibliografia_items || []).map(b => b.text || '').join('\n'))
+        bibliografiaForSave = norm.bibliografia_items
+      } else if (norm.bibliografia) {
+        setBibliografiaText(norm.bibliografia)
+        const lines = (norm.bibliografia || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+        const items = lines.map((ln) => {
+          const m = ln.match(/(https?:\/\/[^\s]+)/i)
+          const url = m ? m[1] : ''
+          const display = url ? ln.replace(url, '').trim() : ln
+          return { text: display, link: url }
+        })
+        setBibliografiaItems(items)
+        bibliografiaForSave = items
+      } else {
+        setBibliografiaText('')
+        setBibliografiaItems([])
+        bibliografiaForSave = ''
+      }
+      // Si la API no devolvió bibliografía, intentar extraer 'Fuente' desde actividades generadas
+  if ((!bibliografiaForSave || (Array.isArray(bibliografiaForSave) && bibliografiaForSave.length === 0)) && actividadesText) {
+        try {
+          const fuentes = []
+          const lines = actividadesText.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+          for (const ln of lines) {
+            const m = ln.match(/^(?:Fuente bibliográfica|Fuente)\s*[:\-–]?\s*(.+)$/i)
+            if (m) {
+              const val = m[1].trim()
+              if (val && !fuentes.includes(val)) fuentes.push(val)
+            }
+          }
+          if (fuentes.length) {
+            const itemsFromFuentes = fuentes.map(f => {
+              const um = f.match(/(https?:\/\/[^\s]+)/i)
+              return { text: um ? f.replace(um[1], '').trim() : f, link: um ? um[1] : '' }
+            })
+            setBibliografiaItems(itemsFromFuentes)
+            setBibliografiaText(itemsFromFuentes.map(i => i.text).join('\n'))
+            // prefer to save these extracted items
+            bibliografiaForSave = itemsFromFuentes
+          }
+        } catch (err) {
+          console.warn('extraction of fuentes failed', err)
+        }
+      }
       // persistir inmediatamente las secciones generadas
       saveSnapshot({
         datos: res.datos || '',
@@ -419,7 +530,8 @@ export default function GuideForm() {
         actividades: res.actividades || '',
         rubrica: sanitizedRubrica || '',
         autoevaluacion: res.autoevaluacion || '',
-        bibliografia: res.bibliografia || '',
+        bibliografia: bibliografiaForSave !== null ? bibliografiaForSave : ((bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems : (res.bibliografia || '')),
+        imageUrl: imageUrl || '',
         guideNumber: guideNumber || ''
       })
     } catch (err) {
@@ -629,23 +741,86 @@ export default function GuideForm() {
   }
 
   function renderBibliografia() {
-    if (!bibliografiaText || !bibliografiaText.trim()) return <div className="text-gray-500">No hay bibliografía aún. Pide generar la guía para obtener fuentes sugeridas.</div>
-    // dividir por líneas y procesar cada referencia
+    const hasItems = bibliografiaItems && bibliografiaItems.length
+    const hasText = bibliografiaText && bibliografiaText.trim()
+    if (!hasItems && !hasText) return <div className="text-gray-500">No hay bibliografía aún. Pide generar la guía para obtener fuentes sugeridas.</div>
+
+    // Modo edición: permitir editar cada referencia (texto APA) y su enlace
+    if (editingSections.bibliografia) {
+      const items = hasItems ? bibliografiaItems : (bibliografiaText.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(ln => {
+        const m = ln.match(/(https?:\/\/[^\s]+)/i)
+        const url = m ? m[1] : ''
+        const display = url ? ln.replace(url, '').trim() : ln
+        return { text: display, link: url }
+      }))
+      return (
+        <div className="space-y-3">
+          {items.map((it, idx) => (
+            <div key={'bib-edit-' + idx} className="grid grid-cols-1 sm:grid-cols-6 gap-2 items-center">
+              <div className="sm:col-span-3">
+                <label className="text-sm font-medium">Referencia</label>
+                <input className="mt-1 block w-full border rounded p-2" value={it.text} onChange={(e) => {
+                  const next = items.map((x, i) => i === idx ? { ...x, text: e.target.value } : x)
+                  setBibliografiaItems(next)
+                  setBibliografiaText(next.map(n => n.text).join('\n'))
+                  saveSnapshot({ bibliografia: next })
+                }} />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="text-sm font-medium">Enlace (opcional)</label>
+                <input className="mt-1 block w-full border rounded p-2" value={it.link || ''} onChange={(e) => {
+                  const next = items.map((x, i) => i === idx ? { ...x, link: e.target.value } : x)
+                  setBibliografiaItems(next)
+                  setBibliografiaText(next.map(n => n.text).join('\n'))
+                  saveSnapshot({ bibliografia: next })
+                }} placeholder="https://..." />
+              </div>
+              <div className="sm:col-span-6 flex gap-2 justify-end">
+                <button type="button" className="px-3 py-1 bg-red-200 rounded" onClick={() => {
+                  const next = items.filter((_, i) => i !== idx)
+                  setBibliografiaItems(next)
+                  setBibliografiaText(next.map(n => n.text).join('\n'))
+                  saveSnapshot({ bibliografia: next })
+                }}>Eliminar</button>
+              </div>
+            </div>
+          ))}
+          <div>
+            <button type="button" className="px-3 py-1 bg-gray-100 rounded" onClick={() => {
+              const next = [...items, { text: '', link: '' }]
+              setBibliografiaItems(next)
+              setBibliografiaText(next.map(n => n.text).join('\n'))
+              saveSnapshot({ bibliografia: next })
+              // ensure editing remains enabled
+              setEditingSections((p) => ({ ...p, bibliografia: true }))
+            }}>Añadir referencia</button>
+          </div>
+        </div>
+      )
+    }
+
+    // Modo visual: mostrar solo la referencia en formato APA (texto). El enlace se usa solo internamente/para JSON.
+    if (hasItems) {
+      return (
+        <ol className="list-decimal pl-5 space-y-2">
+          {bibliografiaItems.map((it, idx) => (
+            <li key={'bib-' + idx} className="text-slate-800">
+              {it.link ? (
+                <a href={it.link} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{it.text}</a>
+              ) : (
+                it.text
+              )}
+            </li>
+          ))}
+        </ol>
+      )
+    }
+
+    // Fallback: mostrar bibliografiaText como líneas
     const lines = bibliografiaText.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
     return (
       <ol className="list-decimal pl-5 space-y-2">
-        {lines.map((ln, idx) => {
-          
-          const display = ln.replace(/https?:\/\/[^\s]+/i, '').trim()
-          const href = makeSearchUrlForRef(display)
-          return (
-            <li key={'bib-' + idx} className="">
-              <a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">
-                {display || href}
-              </a>
-            </li>
-          )
-        })}
+        {lines.map((ln, idx) => (<li key={'bib-' + idx} className="text-slate-800">{ln}</li>))}
       </ol>
     )
   }
@@ -674,6 +849,44 @@ export default function GuideForm() {
         <div>
           <label htmlFor="asignatura" className="block text-sm font-medium">Asignatura</label>
           <input id="asignatura" className="mt-1 block w-full border rounded p-2" value={asignatura} onChange={(e) => { setAsignatura(e.target.value); saveSnapshot({ asignatura: e.target.value }); }} />
+        </div>
+
+        <div>
+          <label htmlFor="imageUrl" className="block text-sm font-medium">Carátula (imageUrl)</label>
+          <div className="mt-2">
+            {imageUrl && !editingImage ? (
+              <div className="flex items-center gap-3">
+                <button type="button" className="p-0 border rounded" onClick={() => setShowImageModal(true)}>
+                  <img src={imageUrl} alt="preview" className="w-12 h-8 object-cover rounded border" onError={(e) => { e.target.style.display = 'none' }} />
+                </button>
+                <div className="flex gap-2">
+                  <button type="button" className="px-3 py-1 bg-amber-500 text-white rounded" onClick={() => setEditingImage(true)}>Cambiar imagen</button>
+                  <button type="button" className="px-3 py-1 bg-red-200 rounded" onClick={() => { setImageUrl(''); saveSnapshot({ imageUrl: '' }); setEditingImage(true) }}>Eliminar</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <input id="imageUrl" className="block w-full border rounded p-2" value={imageUrl} onChange={(e) => { setImageUrl(e.target.value); }} placeholder="https://.../cover.png" />
+                <button type="button" className="px-3 py-1 bg-green-600 text-white rounded" onClick={() => { saveSnapshot({ imageUrl: imageUrl || '' }); setEditingImage(false) }}>Guardar</button>
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-1">Pega una URL pública de imagen para usar como carátula. Se guardará en la guía y se mostrará en el visor.</p>
+          </div>
+          {showImageModal ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+              role="dialog"
+              aria-modal="true"
+              tabIndex={-1}
+              onClick={() => setShowImageModal(false)}
+              onKeyDown={(e) => { if (e.key === 'Escape') setShowImageModal(false) }}
+            >
+              <div className="bg-white p-4 rounded max-w-[90%] max-h-[90%] overflow-auto" onClick={(e) => e.stopPropagation()}>
+                <div className="flex justify-end"><button className="px-2 py-1" onClick={() => setShowImageModal(false)}>Cerrar</button></div>
+                <img src={imageUrl} alt="Carátula completa" className="max-w-full max-h-[80vh] object-contain" />
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div>
@@ -712,7 +925,8 @@ export default function GuideForm() {
           <button type="submit" disabled={loading} className="px-4 py-2 bg-blue-600 text-white rounded">{loading ? 'Generando...' : 'Generar guía'}</button>
           <button type="button" onClick={() => {
             // descargar las secciones concatenadas
-            const content = `--DATOS--\n${datosText}\n\n--DESARROLLO--\n${desarrolloText}\n\n--ACTIVIDADES--\n${actividadesText}\n\n--RUBRICA--\n${rubricaText}\n\n--AUTOEVALUACION--\n${autoevaluacionText}\n\n--BIBLIOGRAFIA--\n${bibliografiaText}`
+              const bibForTxt = (bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems.map(b => (b.text || '') + (b.link ? ' ' + b.link : '')).join('\n') : bibliografiaText
+              const content = `--DATOS--\n${datosText}\n\n--DESARROLLO--\n${desarrolloText}\n\n--ACTIVIDADES--\n${actividadesText}\n\n--RUBRICA--\n${rubricaText}\n\n--AUTOEVALUACION--\n${autoevaluacionText}\n\n--BIBLIOGRAFIA--\n${bibForTxt}`
             const blob = new Blob([content], { type: 'text/plain' })
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
@@ -725,7 +939,7 @@ export default function GuideForm() {
           }} className="px-3 py-2 bg-gray-200 rounded">Descargar .txt</button>
           <button type="button" onClick={() => {
             // construir objeto JSON con la estructura esperada por GuideViewer
-            const guideId = `guia-${Date.now()}`
+            const guideId = `${Date.now()}`
             let titleStr = ''
             if (asignatura) {
               titleStr = asignatura
@@ -737,6 +951,8 @@ export default function GuideForm() {
               id: guideId,
               titulo: titleStr,
               asignatura: asignatura || '',
+              guideNumber: guideNumber || '',
+              imageUrl: imageUrl || '',
               unidad: unidad || '',
               temas: temas.map(t => t.text).filter(Boolean),
               datos: datosText || '',
@@ -744,7 +960,7 @@ export default function GuideForm() {
               actividades: actividadesText || '',
               rubrica: rubricaText || '',
               autoevaluacion: autoevaluacionText || '',
-              bibliografia: bibliografiaText || ''
+              bibliografia: (bibliografiaItems && bibliografiaItems.length) ? bibliografiaItems : (bibliografiaText || '')
             }
             const jsonStr = JSON.stringify(guideObj, null, 2)
             const blobJson = new Blob([jsonStr], { type: 'application/json' })
@@ -772,15 +988,28 @@ export default function GuideForm() {
               <h3 className="font-semibold text-lg text-left text-sky-700">DATOS</h3>
               <p className="text-sm text-gray-500 mt-1">Información general y metadatos de la guía</p>
             </div>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['datos'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={() => handleCopy('datos', datosText)}
-            >
-              {copiedMap['datos'] ? 'Copiado' : 'Copiar texto'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className={`px-3 py-1 rounded text-sm transition ${copiedMap['datos'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+                onClick={() => handleCopy('datos', datosText)}
+              >
+                {copiedMap['datos'] ? 'Copiado' : 'Copiar texto'}
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1 rounded text-sm ${editingSections.datos ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`}
+                onClick={() => toggleEditing('datos')}
+              >
+                {editingSections.datos ? 'Listo' : 'Editar'}
+              </button>
+            </div>
           </div>
           <div className="mt-4">
-            {renderDatos()}
+            {editingSections.datos ? (
+              <textarea className="w-full min-h-[160px] border rounded p-2" value={datosText} onChange={(e) => { setDatosText(e.target.value); saveSnapshot({ datos: e.target.value }); }} />
+            ) : (
+              renderDatos()
+            )}
           </div>
         </section>
 
@@ -790,55 +1019,52 @@ export default function GuideForm() {
               <h3 className="font-semibold text-lg text-left text-violet-700">DESARROLLO</h3>
               <p className="text-sm text-gray-500 mt-1">Estructura del desarrollo de la unidad y actividades de aprendizaje</p>
             </div>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['desarrollo'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={() => handleCopy('desarrollo', desarrolloText)}
-            >
-              {copiedMap['desarrollo'] ? 'Copiado' : 'Copiar texto'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className={`px-3 py-1 rounded text-sm transition ${copiedMap['desarrollo'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
+                onClick={() => handleCopy('desarrollo', desarrolloText)}
+              >
+                {copiedMap['desarrollo'] ? 'Copiado' : 'Copiar texto'}
+              </button>
+              <button type="button" className={`px-3 py-1 rounded text-sm ${editingSections.desarrollo ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`} onClick={() => toggleEditing('desarrollo')}>{editingSections.desarrollo ? 'Listo' : 'Editar'}</button>
+            </div>
           </div>
           <div className="mt-4 bg-slate-50 border rounded-md p-4 text-gray-800 whitespace-pre-wrap text-left">
-            {desarrolloText || <span className="text-gray-500">El desarrollo aparecerá aquí después de generar la guía.</span>}
+            {editingSections.desarrollo ? (<textarea className="w-full min-h-[160px] border rounded p-2" value={desarrolloText} onChange={(e) => { setDesarrolloText(e.target.value); saveSnapshot({ desarrollo: e.target.value }); }} />) : (desarrolloText || <span className="text-gray-500">El desarrollo aparecerá aquí después de generar la guía.</span>)}
           </div>
         </section>
 
   <section className="border rounded p-4 bg-gradient-to-br from-white to-emerald-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">ACTIVIDADES</h3>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['actividades'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={() => handleCopy('actividades', actividadesText)}
-            >
-              {copiedMap['actividades'] ? 'Copiado' : 'Copiar texto'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button className={`px-3 py-1 rounded text-sm transition ${copiedMap['actividades'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`} onClick={() => handleCopy('actividades', actividadesText)}>{copiedMap['actividades'] ? 'Copiado' : 'Copiar texto'}</button>
+              <button type="button" className={`px-3 py-1 rounded text-sm ${editingSections.actividades ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`} onClick={() => toggleEditing('actividades')}>{editingSections.actividades ? 'Listo' : 'Editar'}</button>
+            </div>
           </div>
-          <div className="mt-3 text-gray-800 text-left">{renderActividades()}</div>
+          <div className="mt-3 text-gray-800 text-left">{editingSections.actividades ? (<textarea className="w-full min-h-[160px] border rounded p-2" value={actividadesText} onChange={(e) => { setActividadesText(e.target.value); saveSnapshot({ actividades: e.target.value }); }} />) : (renderActividades())}</div>
         </section>
 
   <section className="border rounded p-4 bg-gradient-to-br from-white to-rose-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">RÚBRICA</h3>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['rubrica'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={copyRubricaTable}
-            >
-              {copiedMap['rubrica'] ? 'Copiado' : 'Copiar tabla'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button className={`px-3 py-1 rounded text-sm transition ${copiedMap['rubrica'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`} onClick={copyRubricaTable}>{copiedMap['rubrica'] ? 'Copiado' : 'Copiar tabla'}</button>
+              <button type="button" className={`px-3 py-1 rounded text-sm ${editingSections.rubrica ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`} onClick={() => toggleEditing('rubrica')}>{editingSections.rubrica ? 'Listo' : 'Editar'}</button>
+            </div>
           </div>
-          <div className="mt-3 text-gray-800 text-left">{renderRubrica()}</div>
+          <div className="mt-3 text-gray-800 text-left">{editingSections.rubrica ? (<textarea className="w-full min-h-[160px] border rounded p-2" value={rubricaText} onChange={(e) => { setRubricaText(e.target.value); saveSnapshot({ rubrica: e.target.value }); }} />) : (renderRubrica())}</div>
         </section>
 
   <section className="border rounded p-4 bg-gradient-to-br from-white to-amber-50">
           <div className="flex justify-between items-start">
             <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">AUTOEVALUACIÓN</h3>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['autoevaluacion'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={() => handleCopy('autoevaluacion', autoevaluacionText)}
-            >
-              {copiedMap['autoevaluacion'] ? 'Copiado' : 'Copiar texto'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button className={`px-3 py-1 rounded text-sm transition ${copiedMap['autoevaluacion'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`} onClick={() => handleCopy('autoevaluacion', autoevaluacionText)}>{copiedMap['autoevaluacion'] ? 'Copiado' : 'Copiar texto'}</button>
+              <button type="button" className={`px-3 py-1 rounded text-sm ${editingSections.autoevaluacion ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`} onClick={() => toggleEditing('autoevaluacion')}>{editingSections.autoevaluacion ? 'Listo' : 'Editar'}</button>
+            </div>
           </div>
-          <div className="mt-3 text-gray-800 text-left">{renderAutoevaluacion()}</div>
+          <div className="mt-3 text-gray-800 text-left">{editingSections.autoevaluacion ? (<textarea className="w-full min-h-[160px] border rounded p-2" value={autoevaluacionText} onChange={(e) => { setAutoevaluacionText(e.target.value); saveSnapshot({ autoevaluacion: e.target.value }); }} />) : (renderAutoevaluacion())}</div>
         </section>
 
         <section className="rounded-lg border p-4 bg-gradient-to-br from-white to-amber-50 shadow-sm">
@@ -847,15 +1073,14 @@ export default function GuideForm() {
               <h3 className="font-semibold text-lg text-left text-amber-700">BIBLIOGRAFÍA</h3>
               <p className="text-sm text-gray-500 mt-1">Fuentes y referencias recomendadas (preferir fuentes en español)</p>
             </div>
-            <button
-              className={`px-3 py-1 rounded text-sm transition ${copiedMap['bibliografia'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`}
-              onClick={() => handleCopy('bibliografia', bibliografiaText)}
-            >
-              {copiedMap['bibliografia'] ? 'Copiado' : 'Copiar texto'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button className={`px-3 py-1 rounded text-sm transition ${copiedMap['bibliografia'] ? 'bg-green-500 text-white' : 'bg-blue-50 text-blue-700 border'}`} onClick={() => handleCopy('bibliografia', bibliografiaText)}>{copiedMap['bibliografia'] ? 'Copiado' : 'Copiar texto'}</button>
+              <button type="button" className={`px-3 py-1 rounded text-sm ${editingSections.bibliografia ? 'bg-amber-500 text-white' : 'bg-white border text-slate-700'}`} onClick={() => toggleEditing('bibliografia')}>{editingSections.bibliografia ? 'Listo' : 'Editar'}</button>
+            </div>
           </div>
-          <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 text-left">
-            {renderBibliografia()}
+      <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 text-left">
+        {renderBibliografia()}
+              
           </div>
         </section>
 

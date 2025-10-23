@@ -42,6 +42,10 @@ Instrucciones (texto plano):
 - En --RUBRICA-- entrega EXACTAMENTE 4 criterios. Para cada criterio proporciona tres niveles con estos títulos exactos: "Muy bien", "Bien", "En progreso". No añadas valores numéricos ni puntuaciones dentro de las descripciones de nivel.
 - En --AUTOEVALUACION-- entrega 10 preguntas de opción múltiple en texto plano; cada pregunta debe incluir claramente las opciones A), B), C) y D). Marca la opción correcta INLINE añadiendo la etiqueta "(correcto)" inmediatamente después del texto de la opción correcta.
 - En --BIBLIOGRAFIA-- lista las referencias en formato APA en texto plano, una referencia por línea y añade una URL editorial o de búsqueda al final de cada línea si aplica.
+- En --BIBLIOGRAFIA-- lista las referencias en formato APA en texto plano, una referencia por línea. Es OBLIGATORIO que cada línea siga exactamente esta estructura:
+  <Referencia APA> | <URL>   (por ejemplo: Pérez, J. (2020). Título. Editorial. | https://editorial.example/obra)
+  Si no existe una URL directa, escribe: <Referencia APA> | NO_LINK
+  No uses más de un carácter "|" por línea. Evita agregar texto adicional fuera de la estructura indicada. Si la fuente debe buscarse, incluye NO_LINK y el cliente generará un enlace de búsqueda.
 
 Responde únicamente con las secciones delimitadas y su contenido en texto plano; no añadas explicaciones, encabezados extra ni JSON.`;
 
@@ -123,6 +127,45 @@ Responde únicamente con las secciones delimitadas y su contenido en texto plano
       sections[mapped] = content.slice(start, end).trim()
     }
   }
+
+  // Además, parsear la sección de bibliografía en un array estructurado
+  // Cada línea esperada: "<Referencia APA> | <URL>" o "<Referencia APA> | NO_LINK"
+  const bibRaw = sections['bibliografia'] || ''
+  const bibLines = bibRaw.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const urlRe = /(https?:\/\/[^\s]+)/i
+  const bibliografia_items = bibLines.map(line => {
+    let text = line
+    let link = null
+
+    // Preferir el separador '|' si existe
+    if (line.includes('|')) {
+      const parts = line.split('|')
+      // unir todo menos el último por si la referencia contiene '|' accidentalmente
+      text = parts.slice(0, -1).join('|').trim()
+      const maybeLink = parts[parts.length - 1].trim()
+      if (maybeLink && maybeLink.toUpperCase() !== 'NO_LINK') {
+        link = maybeLink
+      }
+    } else {
+      // intentar extraer URL inline si no usan '|'
+      const m2 = line.match(urlRe)
+      if (m2) {
+        link = m2[1]
+        text = line.replace(m2[0], '').trim()
+      }
+    }
+
+    // Si no hay link explícito, crear un enlace de búsqueda para facilitar la apertura desde el viewer
+    if (!link) {
+      const q = encodeURIComponent(text || '')
+      link = `https://www.google.com/search?q=${q}`
+    }
+
+    return { text: text || line, link }
+  })
+
+  // Añadir la estructura parseada al objeto devuelto para que GuideForm/GuideViewer la consuman
+  sections['bibliografia_items'] = bibliografia_items
 
   return sections
 }

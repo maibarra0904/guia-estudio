@@ -184,9 +184,9 @@ export default function GuideViewer() {
   const rubrica = parseRubricaTable(guide.rubrica)
   const auto = parseAuto(guide.autoevaluacion)
 
-  // Build a viewer title using the 'Número de guía' from guide.datos when present
+  // Build a viewer title: prefer `guide.guideNumber` (persisted field), then 'Número de guía' from guide.datos, then guide.id or route id
   const numeroDesdeDatos = parseNumeroGuia(guide?.datos)
-  const guideNumber = numeroDesdeDatos || guide?.id || id
+  const guideNumber = guide?.guideNumber || numeroDesdeDatos || guide?.id || id
   const asignaturaName = guide?.asignatura || guide?.titulo
   const viewerTitle = (guideNumber && asignaturaName) ? `Guía de Estudio Nro. ${guideNumber} de ${asignaturaName}` : (guide?.titulo || 'Guía de Estudio')
 
@@ -223,7 +223,7 @@ export default function GuideViewer() {
             <div className="mt-3 text-sm text-slate-800">{asignaturaName || ''}</div>
           </div>
           <div className="sm:col-span-1 bg-slate-900 flex items-center justify-center">
-            <img src={caratula} alt="Carátula" className="w-full h-48 sm:h-64 object-contain" />
+            <img src={guide.imageUrl || caratula} alt={guide.titulo || 'Carátula'} className="w-full h-48 sm:h-64 object-contain" />
           </div>
         </div>
       </div>
@@ -271,9 +271,6 @@ export default function GuideViewer() {
                             <span className="font-semibold text-amber-700">Fuente: </span>
                             <div className="text-slate-800">
                               <div>{display}</div>
-                              {url ? (
-                                <div className="mt-1"><a href={url} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{url}</a></div>
-                              ) : null}
                             </div>
                           </div>
                         )
@@ -356,11 +353,23 @@ export default function GuideViewer() {
         <div className="mt-4 bg-white border rounded-md p-4 text-gray-800 text-left">
           {guide.bibliografia ? (
             <ol className="list-decimal pl-5 space-y-2">
-                {guide.bibliografia.split(/\r?\n/).map((ln, i) => {
-                    const display = ln.replace(/https?:\/\/[^\s]+/i, '').trim()
-                    const href = makeSearchUrlForRef(display)
-                    return (<li key={'bib-' + i}><a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{display || href}</a></li>)
-                  })}
+              {Array.isArray(guide.bibliografia) ? (
+                guide.bibliografia.map((item, i) => {
+                  const text = item?.text || ''
+                  const href = item?.link || (text ? makeSearchUrlForRef(text) : '')
+                  return (
+                    <li key={'bib-' + i}>
+                      <a href={href || '#'} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{text || href}</a>
+                    </li>
+                  )
+                })
+              ) : (
+                guide.bibliografia.split(/\r?\n/).map((ln, i) => {
+                  const display = ln.replace(/https?:\/\/[^\s]+/i, '').trim()
+                  const href = makeSearchUrlForRef(display)
+                  return (<li key={'bib-' + i}><a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{display || href}</a></li>)
+                })
+              )}
             </ol>
           ) : (<div className="text-gray-600">No hay bibliografía.</div>)}
         </div>
