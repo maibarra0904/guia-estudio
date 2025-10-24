@@ -1,6 +1,22 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react'
 import generateGuide from '../services/groqService'
 import normalizeGuide from '../services/normalizeGuide'
+import GUIDES from '../data/guides'
+import GuideSelector from './GuideSelector'
+
+// Helper: build index of asignaturas -> unidades -> guideId
+function _buildGuideIndex(guidesMap) {
+  const index = {}
+  if (!guidesMap) return index
+  for (const key of Object.keys(guidesMap)) {
+    const g = guidesMap[key]
+    const asig = g.asignatura || 'Sin asignatura'
+    const uni = g.unidad || g.titulo || 'Sin unidad'
+    if (!index[asig]) index[asig] = {}
+    index[asig][uni] = g.id || key
+  }
+  return index
+}
 
 const LS_KEY = 'guideForm_v1'
 
@@ -197,6 +213,7 @@ export default function GuideForm() {
   const [asignatura, setAsignatura] = useState('')
   const [unidad, setUnidad] = useState('')
   const [guideNumber, setGuideNumber] = useState('')
+  // guide index builder is available via buildGuideIndex(GUIDES) when needed
   const [temas, setTemas] = useState(() => [{ id: `tema-0-${Date.now()}`, text: '' }])
   const [semanaInicio, setSemanaInicio] = useState('')
   const [groqKey, setGroqKey] = useState('')
@@ -230,6 +247,44 @@ export default function GuideForm() {
     autoevaluacion: false,
     bibliografia: false
   })
+
+  // Cargar una guía desde la data pública GUIDES
+  function handleLoadGuide(guide) {
+    if (!guide) return
+    setAsignatura(guide.asignatura || '')
+    setUnidad(guide.unidad || '')
+    setGuideNumber(guide.guideNumber || guide.guiaNumero || '')
+    setTemas((guide.temas && guide.temas.length) ? guide.temas.map((t,i) => ({ id: `tema-${i}-${Date.now()}`, text: t })) : [{ id: `tema-0-${Date.now()}`, text: '' }])
+    setSemanaInicio(guide.semanaInicio || '')
+    setImageUrl(guide.imageUrl || '')
+    setEditingImage(!guide.imageUrl)
+    setDatosText(guide.datos || '')
+    setDesarrolloText(guide.desarrollo || '')
+    setActividadesText(guide.actividades || '')
+    setRubricaText(sanitizeRubricaText(guide.rubrica || ''))
+    setAutoevaluacionText(guide.autoevaluacion || '')
+    // bibliografía: si es array de items, usarlo
+    if (guide.bibliografia) {
+      if (Array.isArray(guide.bibliografia)) {
+        setBibliografiaItems(guide.bibliografia)
+        setBibliografiaText(guide.bibliografia.map(b => b.text || '').join('\n'))
+      } else if (typeof guide.bibliografia === 'string') {
+        setBibliografiaText(guide.bibliografia)
+        const lines = guide.bibliografia.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+        const items = lines.map(ln => {
+          const m = ln.match(/(https?:\/\/[^\s]+)/i)
+          const url = m ? m[1] : ''
+          const display = url ? ln.replace(url, '').trim() : ln
+          return { text: display, link: url }
+        })
+        setBibliografiaItems(items)
+      }
+    } else {
+      setBibliografiaItems([])
+      setBibliografiaText('')
+    }
+    saveSnapshot()
+  }
 
   function toggleEditing(section) {
     setEditingSections((prev) => {
@@ -318,6 +373,8 @@ export default function GuideForm() {
     // indicar que la hidratación inicial terminó
     setHydrated(true)
   }, [])
+
+  // guideIndex is available if needed; selector lists live in GuideSelector
 
   useEffect(() => {
     if (!hydrated) return // no escribir hasta haber cargado la snapshot inicial
@@ -830,6 +887,10 @@ export default function GuideForm() {
     <div className="max-w-3xl mx-auto p-4">
       <h1 className="text-2xl font-bold text-center mb-4">Guías de Estudio</h1>
       <form onSubmit={handleGenerate} className="space-y-4">
+        {/* Selector de guías ahora está en un componente drawer separado */}
+        <div>
+          <GuideSelector onLoad={handleLoadGuide} />
+        </div>
         <div className="border rounded p-3">
           <label htmlFor="groqKeyInput" className="block text-sm font-medium">Clave API Groq</label>
           {editingKey ? (
