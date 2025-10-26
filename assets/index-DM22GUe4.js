@@ -409,12 +409,7 @@ Fuente bibliográfica: OpenStax. (s.f.). Ondas sonoras. En Física universitaria
 Realizar ejercicios de cálculo de la velocidad del sonido en diferentes medios y determinar niveles de intensidad.  
 Formato de entrega: Informe en pdf con ejercicios. 
 Fecha de entrega: Semana 7.  
-Fuente: Wikilibros. (s.f.). Física/Acústica/Velocidad del sonido. Wikilibros.
-
-Realizar ejercicios de cálculo de la relación señal-ruido (SNR) y discutir los efectos sobre la audición.  
-Formato de entrega: Informe en PDF que incluya ejercicios  
-Fecha de entrega: Semana 8.  
-Fuente bibliográfica: IES Murgi. (s.f.). Unidad 1: Vibraciones y ondas – El sonido.`,rubrica:`Comprensión de conceptos  
+Fuente: Wikilibros. (s.f.). Física/Acústica/Velocidad del sonido. Wikilibros.`,rubrica:`Comprensión de conceptos  
 Muy bien: demuestra dominio completo de los conceptos clave y los explica con precisión.  
 Bien: comprende la mayoría de los conceptos, con explicaciones claras y coherentes.  
 En progreso: muestra comprensión parcial, con algunas explicaciones confusas o incompletas.  
