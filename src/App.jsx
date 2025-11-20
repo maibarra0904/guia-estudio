@@ -3,6 +3,7 @@ import './App.css'
 import { HashRouter, Routes, Route, Link } from 'react-router-dom'
 import GuideForm from './components/GuideForm'
 import GuideViewer from './components/GuideViewer'
+import GuideList from './components/GuideList'
 import GuideIndex from './components/GuideIndex'
 
 function App() {
@@ -12,7 +13,7 @@ function App() {
   <HashRouter>
       <div className="min-h-screen bg-gray-100 p-6">
         <header className="mb-4 flex justify-center">
-          
+          <h1 className="text-3xl sm:text-4xl font-bold text-center">Guías de Estudio</h1>
           {/* <nav>
             <Link to="/" className="text-sky-700 hover:underline mr-3">Generador</Link>
             <Link to="/guia-1" className="text-sky-700 hover:underline">Ver guía ejemplo</Link>
@@ -29,6 +30,7 @@ function App() {
         /guia-estudio/, /guia-estudio/generador and /guia-estudio/guia-1 */}
       <Route path="/" element={<GuideIndex />} />
       <Route path="/generador" element={<GuideForm />} />
+      <Route path="/list" element={<GuideList />} />
       <Route path=":id" element={<GuideViewer />} />
           </Routes>
         </main>

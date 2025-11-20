@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import guides from '../data/guides'
 import caratula from '../assets/caratula.png'
@@ -132,15 +132,15 @@ function renderDatosViewer(datosText, guide) {
     <div className="space-y-2 text-left">
       {metaEntries.map((p, i) => (
         <div key={'meta-' + i} className="bg-white border rounded-md p-3 shadow-sm text-left">
-          <div className="text-sm text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800">{p.value}</span></div>
+          <div className="text-sm sm:text-base text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800 text-sm sm:text-base">{p.value}</span></div>
         </div>
       ))}
       {parsedFiltered.map((p, i) => (
         <div key={'d-' + i} className="bg-white border rounded-md p-3 shadow-sm text-left">
           {p.label ? (
-            <div className="text-sm text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800">{p.value}</span></div>
+            <div className="text-sm sm:text-base text-gray-600"><span className="font-semibold text-sky-700">{p.label}:</span> <span className="text-slate-800 text-sm sm:text-base">{p.value}</span></div>
           ) : (
-            <div className="text-slate-800">{p.value}</div>
+            <div className="text-slate-800 text-sm sm:text-base">{p.value}</div>
           )}
         </div>
       ))}
@@ -170,6 +170,29 @@ export default function GuideViewer() {
   const guide = Array.isArray(guides) ? guides.find(g => g.id === id) : guides[id]
   console.log('GuideViewer: loaded guide for id=', id, guide)
 
+  // Mobile-only paginator state must be declared unconditionally (before early returns)
+  const [page, setPage] = useState(0)
+  const [isMobile, setIsMobile] = useState(false)
+  const sectionLabels = ['DATOS', 'DESARROLLO', 'ACTIVIDADES', 'RÚBRICA', 'AUTOEVALUACIÓN', 'BIBLIOGRAFÍA']
+  const lastPage = sectionLabels.length - 1
+  function prevPage() { setPage(p => Math.max(0, p - 1)) }
+  function nextPage() { setPage(p => Math.min(lastPage, p + 1)) }
+
+  // Detect small screens (match Tailwind's `sm` breakpoint at 640px)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 639px)')
+    const handle = (e) => setIsMobile(e.matches)
+    // set initial
+    setIsMobile(mq.matches)
+    // listen for changes
+    if (mq.addEventListener) mq.addEventListener('change', handle)
+    else mq.addListener(handle)
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', handle)
+      else mq.removeListener(handle)
+    }
+  }, [])
+
   if (!guide) {
     return (
       <div className="max-w-3xl mx-auto p-4">
@@ -184,31 +207,80 @@ export default function GuideViewer() {
   const rubrica = parseRubricaTable(guide.rubrica)
   const auto = parseAuto(guide.autoevaluacion)
 
+  // Choose image source: on mobile always use local `caratula`, on desktop prefer guide.imageUrl
+  const imageSrc = isMobile ? caratula : (guide?.imageUrl || caratula)
+
+  
+
   // Build a viewer title: prefer `guide.guideNumber` (persisted field), then 'Número de guía' from guide.datos, then guide.id or route id
   const numeroDesdeDatos = parseNumeroGuia(guide?.datos)
   const guideNumber = guide?.guideNumber || numeroDesdeDatos || guide?.id || id
   const asignaturaName = guide?.asignatura || guide?.titulo
-  const viewerTitle = (guideNumber && asignaturaName) ? `Guía de Estudio Nro. ${guideNumber} de ${asignaturaName}` : (guide?.titulo || 'Guía de Estudio')
 
   function handlePrintGuide() {
-    try {
-      // marcar el contenedor como imprimible
-      const container = document.getElementById('guide-print-container')
-      if (!container) {
-        window.print()
-        return
+    (async () => {
+      try {
+        const container = document.getElementById('guide-print-container')
+        // if no container, fallback to direct print
+        if (!container) {
+          try { globalThis.print() } catch (e) { console.warn('print not available', e) }
+          return
+        }
+
+        // add class to enable print styles if any
+        container.classList.add('printable')
+
+        // wait for images inside the container to decode (important on mobile where images may be lazy)
+        const imgs = Array.from(container.querySelectorAll('img'))
+        await Promise.all(imgs.map(img => {
+          // If image complete and naturalWidth>0, consider decoded
+          if (img.complete && img.naturalWidth !== 0) return Promise.resolve()
+          // use decode() when available
+          if (img.decode) return img.decode().catch(() => Promise.resolve())
+          // otherwise wait for load/error
+          return new Promise(res => { img.addEventListener('load', res); img.addEventListener('error', res) })
+        }))
+
+        // give browser a moment to reflow with the images
+        await new Promise(r => setTimeout(r, 350))
+
+        try {
+          globalThis.print()
+          // allow enough time for print to capture content
+          setTimeout(() => container.classList.remove('printable'), 400)
+        } catch (err) {
+          console.warn('print() failed, trying fallback window print', err)
+          // fallback: open a new window with the content and trigger print there
+          try {
+            const w = window.open('', '_blank')
+            if (w) {
+              // clone the container to preserve markup
+              const clone = container.cloneNode(true)
+              // basic minimal document
+              w.document.open()
+              w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Guía</title>')
+              // attempt to copy current page stylesheets
+              Array.from(document.querySelectorAll('link[rel=stylesheet], style')).forEach(node => {
+                w.document.write(node.outerHTML)
+              })
+              w.document.write('</head><body>')
+              w.document.write(clone.outerHTML)
+              w.document.write('</body></html>')
+              w.document.close()
+              // wait a bit then trigger print
+              setTimeout(() => { try { w.print(); w.close() } catch (e) { console.warn('fallback print failed', e) } }, 700)
+            }
+          } catch (e2) {
+            console.warn('fallback window print failed', e2)
+          } finally {
+            container.classList.remove('printable')
+          }
+        }
+      } catch (err) {
+        console.warn('print failed', err)
+        try { globalThis.print() } catch (e) { console.warn('final print failed', e) }
       }
-      container.classList.add('printable')
-      // small timeout to ensure styles apply
-      setTimeout(() => {
-        window.print()
-        // cleanup
-        container.classList.remove('printable')
-      }, 100)
-    } catch (err) {
-      console.warn('print failed', err)
-      window.print()
-    }
+    })()
   }
 
   return (
@@ -217,59 +289,94 @@ export default function GuideViewer() {
       {/* Modern cover card */}
       <div className="mb-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-0 rounded-xl overflow-hidden shadow-2xl ring-1 ring-slate-100">
+          <div className="sm:col-span-1 bg-slate-900 flex items-center justify-center overflow-hidden">
+            <img src={imageSrc} alt={guide.titulo || 'Carátula'} className="w-full h-auto sm:h-64 object-contain" />
+          </div>
           <div className="sm:col-span-2 p-4 sm:p-6 flex flex-col justify-center bg-gradient-to-r from-cyan-400 via-cyan-300 to-transparent">
-            <div className="text-amber-800 text-xs uppercase tracking-wide">Guía</div>
-            <div className="mt-2 text-xl sm:text-2xl font-extrabold text-slate-900">{viewerTitle}</div>
-            <div className="mt-2 text-xs sm:text-sm text-slate-800">{asignaturaName || ''}</div>
+            <div className="mt-2 text-lg sm:text-4xl font-extrabold text-slate-900">Guía didáctica para el aprendizaje del estudiante</div>
+            <div className='mt-2 text-lg sm:text-3xl font-extrabold text-indigo-500'>Nro. {guideNumber}</div>
+            <div className="mt-1 text-sm sm:text-base text-slate-800"><span className='text-gray-500'>Asignatura: </span>{asignaturaName}</div>
+            <div className="mt-1 text-xs sm:mt-2 text-gray-500">Elaborado por: <span className="font-semibold text-slate-800">Ing. Mario Ibarra</span></div>
           </div>
-          <div className="sm:col-span-1 bg-slate-900 flex items-center justify-center">
-            <img src={guide.imageUrl || caratula} alt={guide.titulo || 'Carátula'} className="w-full h-32 sm:h-64 object-contain" />
-          </div>
+          
         </div>
+          {/* Mobile paginator: floating, centered and compact */}
+          <div className="sm:hidden fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50">
+            <div className="bg-white/95 backdrop-blur-sm rounded-full shadow-lg px-2 py-1 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={prevPage}
+                disabled={page === 0}
+                aria-label="Anterior"
+                className={page === 0 ? 'w-8 h-8 flex items-center justify-center rounded-full bg-white border text-gray-400 disabled:cursor-not-allowed' : 'w-8 h-8 flex items-center justify-center rounded-full bg-sky-700 text-white shadow-md hover:bg-sky-800'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                  <path fillRule="evenodd" d="M15.78 5.22a.75.75 0 0 0-1.06 0L8.47 11.47a.75.75 0 0 0 0 1.06l6.25 6.25a.75.75 0 0 0 1.06-1.06L9.06 12l6.72-6.72a.75.75 0 0 0 0-1.06z" clipRule="evenodd" />
+                </svg>
+              </button>
+
+              <div className="flex flex-col items-center px-2">
+                <div className="bg-slate-100 px-2 py-0.5 rounded-full text-xs font-semibold">{sectionLabels[page]}</div>
+                <div className="text-xxs text-gray-500 mt-0.5">{page + 1} / {sectionLabels.length}</div>
+              </div>
+
+              <button
+                type="button"
+                onClick={nextPage}
+                disabled={page === lastPage}
+                aria-label="Siguiente"
+                className={page === lastPage ? 'w-8 h-8 flex items-center justify-center rounded-full bg-white border text-gray-400 disabled:cursor-not-allowed' : 'w-8 h-8 flex items-center justify-center rounded-full bg-sky-700 text-white shadow-md hover:bg-sky-800'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                  <path fillRule="evenodd" d="M8.22 18.78a.75.75 0 0 0 1.06 0L15.53 12.53a.75.75 0 0 0 0-1.06L9.28 5.22a.75.75 0 1 0-1.06 1.06L14.94 12l-6.78 6.72a.75.75 0 0 0 0 1.06z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+          </div>
       </div>
 
-  <section className="rounded-lg border p-1 sm:p-4 bg-gradient-to-br from-white to-slate-50 shadow-sm mb-2 sm:mb-4">
+  <section className={`${page === 0 ? 'block' : 'hidden'} sm:block rounded-lg border p-1 sm:p-4 bg-gradient-to-br from-white to-slate-50 shadow-sm mb-2 sm:mb-4`}>
         <div className="flex justify-between items-start">
           <div>
-            <h3 className="font-semibold text-base sm:text-lg text-left text-sky-700">DATOS</h3>
-            <p className="text-xs sm:text-sm text-gray-500 mt-1">Información general y metadatos</p>
+            <h3 className="font-semibold text-base sm:text-3xl text-left text-sky-700">DATOS</h3>
+            
           </div>
-        </div>
+  </div>
         <div className="mt-3">{renderDatosViewer(guide.datos, guide)}</div>
       </section>
 
-  <section className="rounded-lg border p-1 sm:p-4 bg-gradient-to-br from-white to-violet-50 shadow-sm mb-2 sm:mb-4">
+  <section className={`${page === 1 ? 'block' : 'hidden'} sm:block rounded-lg border p-1 sm:p-4 bg-gradient-to-br from-white to-violet-50 shadow-sm mb-2 sm:mb-4`}>
         <div className="flex justify-between items-start">
           <div>
-            <h3 className="font-semibold text-base sm:text-lg text-left text-violet-700">DESARROLLO</h3>
-            <p className="text-xs sm:text-sm text-gray-500 mt-1">Estructura del desarrollo de la unidad</p>
+            <h3 className="font-semibold text-base sm:text-3xl text-left text-violet-700">DESARROLLO</h3>
+            
           </div>
-        </div>
-        <div className="mt-3 bg-slate-50 border rounded-md p-1 sm:p-4 text-gray-800 whitespace-pre-wrap text-left">{guide.desarrollo}</div>
+          </div>
+          <div className="mt-3 bg-slate-50 border rounded-md p-1 sm:p-4 text-sm sm:text-base text-gray-800 whitespace-pre-wrap text-left">{guide.desarrollo}</div>
       </section>
 
-  <section className="border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-emerald-50 mb-2 sm:mb-4">
+  <section className={`${page === 2 ? 'block' : 'hidden'} sm:block border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-emerald-50 mb-2 sm:mb-4`}>
         <div className="flex justify-between items-start">
-          <h3 className="font-semibold text-base sm:text-lg text-left text-slate-800 border-b pb-1">ACTIVIDADES</h3>
+            <h3 className="font-semibold text-base sm:text-3xl text-left text-slate-800 border-b pb-1">ACTIVIDADES</h3>
         </div>
-        <div className="mt-3 text-gray-800 text-left">
+  <div className="mt-3 text-xs sm:text-base text-gray-800 text-left">
           {actividades.length === 0 ? (<div className="text-gray-600">No hay actividades.</div>) : (
             <div className="space-y-4">
               {actividades.map((a, idx) => (
                 <div key={'act-' + idx} className="p-2 sm:p-4 border rounded-lg bg-white shadow-sm">
                   <div>
-                    <h4 className="font-semibold text-base sm:text-lg text-sky-700">Actividad {idx + 1}</h4>
-                    <div className="mt-2 text-gray-700 text-sm">{a.descripcion || a.titulo || a.tema || ''}</div>
+                    <h4 className="font-semibold text-base sm:text-xl text-sky-700">Actividad {idx + 1}</h4>
+                    <div className="mt-2 text-gray-700 text-sm sm:text-base">{a.descripcion || a.titulo || a.tema || ''}</div>
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {a.formato && (<div><span className="font-semibold text-violet-700">Formato: </span><span className="text-slate-800">{a.formato}</span></div>)}
-                      {a.fecha && (<div><span className="font-semibold text-red-600">Fecha: </span><span className="text-slate-800">{a.fecha}</span></div>)}
+                      {a.formato && (<div><span className="font-semibold text-violet-700 text-sm sm:text-base">Formato: </span><span className="text-slate-800 text-sm sm:text-base">{a.formato}</span></div>)}
+                      {a.fecha && (<div><span className="font-semibold text-red-600 text-sm sm:text-base">Fecha: </span><span className="text-slate-800 text-sm sm:text-base">{a.fecha}</span></div>)}
                       {a.fuente && (() => {
                         const url = extractUrl(a.fuente)
                         const display = url ? a.fuente.replace(url, '').trim() : a.fuente
                         return (
                           <div className="sm:col-span-2">
-                            <span className="font-semibold text-amber-700">Fuente: </span>
-                            <div className="text-slate-800">
+                            <span className="font-semibold text-amber-700 text-sm sm:text-base">Fuente: </span>
+                            <div className="text-slate-800 text-sm sm:text-base">
                               <div>{display}</div>
                             </div>
                           </div>
@@ -284,10 +391,10 @@ export default function GuideViewer() {
         </div>
       </section>
 
-  <section className="border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-rose-50 mb-2 sm:mb-4">
+  <section className={`${page === 3 ? 'block' : 'hidden'} sm:block border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-rose-50 mb-2 sm:mb-4`}>
         <div className="flex justify-between items-start">
-          <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">RÚBRICA</h3>
-        </div>
+          <h3 className="font-semibold text-base sm:text-3xl text-left text-slate-800 border-b pb-1">RÚBRICA</h3>
+  </div>
         <div className="mt-3 text-gray-800 text-left">
           {rubrica.length === 0 ? (
             <div className="text-gray-600">No hay rúbrica.</div>
@@ -296,19 +403,19 @@ export default function GuideViewer() {
               <table className="min-w-full table-auto border-collapse">
                 <thead>
                   <tr className="bg-slate-100">
-                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border">Criterio</th>
-                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border">Muy bien<br/><span className="text-xs sm:text-sm text-gray-500">2.5 pts</span></th>
-                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border">Bien<br/><span className="text-xs sm:text-sm text-gray-500">1.75 pts</span></th>
-                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border">En progreso<br/><span className="text-xs sm:text-sm text-gray-500">1 pt</span></th>
+                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border text-sm sm:text-base">Criterio</th>
+                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border text-sm sm:text-base">Muy bien<br/><span className="text-xs sm:text-sm text-gray-500">2.5 pts</span></th>
+                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border text-sm sm:text-base">Bien<br/><span className="text-xs sm:text-sm text-gray-500">1.75 pts</span></th>
+                    <th className="text-left px-2 sm:px-4 py-1 sm:py-2 border text-sm sm:text-base">En progreso<br/><span className="text-xs sm:text-sm text-gray-500">1 pt</span></th>
                   </tr>
                 </thead>
                 <tbody>
                   {rubrica.map((r, i) => (
                     <tr key={'rub-' + i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
                       <td className="px-2 sm:px-4 py-2 align-top border font-semibold text-slate-800 text-sm sm:text-base">{r.criterion}</td>
-                      <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm">{r.muyBien}</td>
-                      <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm">{r.bien}</td>
-                      <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm">{r.enProgreso}</td>
+                        <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm sm:text-base">{r.muyBien}</td>
+                        <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm sm:text-base">{r.bien}</td>
+                        <td className="px-2 sm:px-4 py-2 align-top border text-gray-700 whitespace-pre-wrap text-sm sm:text-base">{r.enProgreso}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -318,21 +425,21 @@ export default function GuideViewer() {
         </div>
       </section>
 
-  <section className="border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-amber-50 mb-2 sm:mb-4">
+  <section className={`${page === 4 ? 'block' : 'hidden'} sm:block border rounded p-1 sm:p-4 bg-gradient-to-br from-white to-amber-50 mb-2 sm:mb-4`}>
         <div className="flex justify-between items-start">
-          <h3 className="font-semibold text-lg text-left text-slate-800 border-b pb-1">AUTOEVALUACIÓN</h3>
-        </div>
+          <h3 className="font-semibold text-base sm:text-3xl text-left text-slate-800 border-b pb-1">AUTOEVALUACIÓN</h3>
+  </div>
         <div className="mt-3 text-gray-800 text-left">
           {auto.length === 0 ? (<div className="text-gray-600">No hay preguntas.</div>) : (
             <div className="space-y-4">
               {auto.map((q, idx) => (
                 <div key={'aq-' + idx} className="p-3 border rounded bg-white">
-                  <div className="font-semibold text-slate-800">{idx + 1}. {q.question}</div>
+                  <div className="font-semibold text-slate-800 text-base sm:text-lg">{idx + 1}. {q.question}</div>
                     <ul className="mt-2 space-y-1">
                     {q.options.map(o => (
                       <li key={o.label} className="p-2 rounded">
-                        <span className="font-semibold mr-2">{o.label})</span>
-                        <span className="text-slate-800">{o.text}</span>
+                        <span className="font-semibold mr-2 text-sm sm:text-sm">{o.label})</span>
+                        <span className="text-slate-800 text-sm sm:text-base">{o.text}</span>
                       </li>
                     ))}
                   </ul>
@@ -343,13 +450,13 @@ export default function GuideViewer() {
         </div>
       </section>
 
-  <section className="rounded-lg border p-2 sm:p-4 bg-gradient-to-br from-white to-amber-50 shadow-sm mb-2 sm:mb-4">
-        <div className="flex justify-between items-start">
+  <section className={`${page === 5 ? 'block' : 'hidden'} sm:block rounded-lg border p-2 sm:p-4 bg-gradient-to-br from-white to-amber-50 shadow-sm mb-2 sm:mb-4`}>
+          <div className="flex justify-between items-start">
           <div>
-            <h3 className="font-semibold text-lg text-left text-amber-700">BIBLIOGRAFÍA</h3>
-            <p className="text-sm text-gray-500 mt-1">Fuentes y referencias</p>
+            <h3 className="font-semibold text-base sm:text-3xl text-left text-amber-700">BIBLIOGRAFÍA</h3>
+            
           </div>
-        </div>
+  </div>
   <div className="mt-4 bg-white border rounded-md p-2 sm:p-4 text-gray-800 text-left">
           {guide.bibliografia ? (
             <ol className="list-decimal pl-5 space-y-2">
@@ -359,7 +466,7 @@ export default function GuideViewer() {
                   const href = item?.link || (text ? makeSearchUrlForRef(text) : '')
                   return (
                     <li key={'bib-' + i}>
-                      <a href={href || '#'} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{text || href}</a>
+                      <a href={href || '#'} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline text-sm sm:text-base">{text || href}</a>
                     </li>
                   )
                 })
@@ -367,7 +474,7 @@ export default function GuideViewer() {
                 guide.bibliografia.split(/\r?\n/).map((ln, i) => {
                   const display = ln.replace(/https?:\/\/[^\s]+/i, '').trim()
                   const href = makeSearchUrlForRef(display)
-                  return (<li key={'bib-' + i}><a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline">{display || href}</a></li>)
+                  return (<li key={'bib-' + i}><a href={href} target="_blank" rel="noreferrer" className="text-sky-700 hover:underline text-sm sm:text-base">{display || href}</a></li>)
                 })
               )}
             </ol>
@@ -376,20 +483,40 @@ export default function GuideViewer() {
       </section>
 
       <div className="mt-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <Link to="/" className="inline-flex items-center justify-center px-4 py-2 bg-white border rounded shadow text-sky-700 hover:bg-slate-50 transition-colors">Volver</Link>
+        <Link to="/" className="hidden sm:inline-flex items-center justify-center px-4 py-2 bg-white border rounded shadow text-sky-700 hover:bg-slate-50 transition-colors">Volver</Link>
         <button
           onClick={handlePrintGuide}
           aria-label="Descargar guía en PDF"
-          className="inline-flex items-center justify-center px-4 py-2 bg-sky-700 text-white rounded shadow hover:bg-sky-800 transition-colors duration-150 ml-auto sm:ml-0"
+          className="hidden sm:inline-flex items-center justify-center px-4 py-2 bg-sky-700 text-white rounded shadow hover:bg-sky-800 transition-colors duration-150 ml-auto sm:ml-0"
         >
           Descargar PDF
         </button>
       </div>
+
+      {/* Mobile-only download button (top-right) */}
+      {/* <button
+        onClick={handlePrintGuide}
+        aria-label="Descargar guía en PDF (móvil)"
+        className="sm:hidden fixed top-4 right-4 z-50 w-10 h-10 rounded-full bg-sky-700 text-white flex items-center justify-center shadow-lg"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+          <path d="M12 3v10.5l3.5-3.5 1.06 1.06L12 17.62l-4.56-4.56L8.5 10.5 12 14.03V3h0z" />
+          <path d="M5 19a2 2 0 002 2h10a2 2 0 002-2v-1H5v1z" />
+        </svg>
+      </button> */}
       
-      {/* Footer: attribution */}
-      <footer className="mt-6 border-t pt-3 text-center text-xs text-gray-500">
-        <div>Elaborado por <span className="font-semibold text-slate-800">Ing. Mario Ibarra</span></div>
-      </footer>
+      {/* Mobile-only floating back button (top-left) */}
+      <Link
+        to="/"
+        aria-label="Volver"
+        className="sm:hidden fixed top-4 left-4 z-50 w-10 h-10 rounded-full bg-white text-sky-700 flex items-center justify-center shadow-lg border"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+          <path fillRule="evenodd" d="M15.78 19.78a.75.75 0 0 1-1.06 0L8.47 13.53a.75.75 0 0 1 0-1.06l6.25-6.25a.75.75 0 1 1 1.06 1.06L9.06 12l6.72 6.72a.75.75 0 0 1 0 1.06z" clipRule="evenodd" />
+        </svg>
+      </Link>
+      
+      {/* Footer removed: attribution now shown in the header for all devices */}
     </div>
   )
 }

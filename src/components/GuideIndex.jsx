@@ -14,18 +14,18 @@ export default function GuideIndex() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto bg-white p-6 rounded shadow">
-      <h2 className="text-xl font-semibold mb-4">Acceder a una guía por ID</h2>
-      <p className="mb-4 text-sm text-gray-600">Introduce el identificador de la guía y pulsa "Ir" para ver la guía.</p>
-      <form onSubmit={handleSubmit} className="flex gap-2">
+    <div className="max-w-md sm:max-w-2xl mx-auto bg-white p-4 sm:p-6 rounded shadow">
+  <h2 className="text-2xl sm:text-3xl font-semibold mb-3">Acceder a una guía por ID</h2>
+  <p className="mb-4 text-base text-gray-600">Introduce el identificador de la guía y pulsa "Ir" para ver la guía.</p>
+      <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
         <input
           aria-label="ID de la guía"
           value={id}
           onChange={e => setId(e.target.value)}
-          className="flex-1 border rounded px-3 py-2"
-          placeholder="Ingresa ID de guía (ej. GE2-CI-C2-25)"
+          className="flex-1 border rounded px-3 py-2 w-full"
+          placeholder="Ingresa ID de guía (ej. 1761271270866)"
         />
-        <button className="bg-sky-600 text-white px-4 py-2 rounded" type="submit">Ir</button>
+        <button className="bg-sky-600 text-white px-4 py-2 rounded w-full sm:w-auto" type="submit">Ir</button>
       </form>
 
       <hr className="my-6" />
